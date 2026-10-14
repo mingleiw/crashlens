@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  end-to-end:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y gdb
+      - name: Install REA and pwntools
+        run: |
+          npm install -g rea-agents
+          python3 -m venv "$RUNNER_TEMP/pwn"
+          "$RUNNER_TEMP/pwn/bin/pip" install pwntools==4.15.0 pyelftools==0.33 unicorn==2.1.2
+          echo "REA_PWNTOOLS_PYTHON=$RUNNER_TEMP/pwn/bin/python" >> "$GITHUB_ENV"
+          echo "CRASHLENS_REA=$(command -v rea)" >> "$GITHUB_ENV"
+      - name: Allow core dumps in the working directory
+        run: echo core | sudo tee /proc/sys/kernel/core_pattern
+      - run: npm ci
+      - run: npm test

@@ -1,0 +1,52 @@
+{
+  "name": "crashlens",
+  "version": "0.1.0",
+  "description": "Turn a Linux core dump into a readable bug report: where it died and why, with evidence. Never runs your program.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "crashlens": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || ^24.11.0 || >=26.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "rea-agents": ">=6.4.0"
+  },
+  "peerDependenciesMeta": {
+    "rea-agents": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mingleiw/crashlens.git"
+  },
+  "homepage": "https://github.com/mingleiw/crashlens#readme",
+  "bugs": {
+    "url": "https://github.com/mingleiw/crashlens/issues"
+  },
+  "keywords": [
+    "crash",
+    "core-dump",
+    "debugging",
+    "triage",
+    "gdb",
+    "reverse-engineering",
+    "rea"
+  ]
+}
