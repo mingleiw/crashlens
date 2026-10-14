@@ -1,5 +1,8 @@
 # crashlens
 
+[![CI](https://github.com/mingleiw/crashlens/actions/workflows/ci.yml/badge.svg)](https://github.com/mingleiw/crashlens/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Logs tell you where your program was. crashlens tells you why it died.**
 
 When a native program crashes, the logs usually just stop. crashlens reads what
@@ -7,40 +10,17 @@ the crash left behind, the core dump and the binary, and writes a bug report
 you can paste into an issue. It never runs your program, needs no SDK, and
 doesn't need your source code.
 
+![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
+
 ```bash
 crashlens ./core ./parser > crash.md
 ```
 
-~~~markdown
-# Crash: NULL pointer dereference in `sum+0x31`
-
-`parser` crashed with **SIGSEGV**: null pointer dereference at `sum+0x31`.
-The program read or wrote through a NULL pointer.
-
-| Field         | Value                      |
-| ------------- | -------------------------- |
-| Signal        | SIGSEGV (code 1)           |
-| Fault address | `0x0`                      |
-| Location      | `sum+0x31 (parser+0x11da)` |
-| Signature     | `7a6c9d31052c`             |
-
-## Backtrace
-```
-#0 0x556fdda1b1da     sum+0x31  [parser]
-#1 0x556fdda1b26a     main+0x75  [parser]
-```
-
-## Instructions at the fault
-```asm
-=> 0x556fdda1b1da <sum+49>:	mov    (%rax),%eax
-```
-
-## Registers used by the faulting instruction
-- `rax` = `0x0` ← NULL
-
-## Suggested next steps
-- [ ] Find where the pointer used by the faulting instruction is assigned and why it can be NULL.
-~~~
+<details open>
+<summary><b>A real report</b>, generated from a crashed C program (paste it straight into a GitHub issue)</summary>
+<br>
+<img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
+</details>
 
 > **Status:** early prototype. Linux x86-64 core dumps from native programs
 > (C, C++, Rust, Go). Got a crash that stumped you? Open an issue. Real
@@ -66,6 +46,8 @@ Every report has a **signature** built from the crash type and top frame names
 crashlens is built on [REA](https://github.com/morluto/rea), an open-source
 reverse-engineering toolkit. Instead of relying on what you chose to log, it
 reads the program itself:
+
+![core dump and binary are read by REA and optionally gdb; crashlens works out why and writes a bug report](docs/images/how-it-works.svg)
 
 | Step | Tool | What it learns |
 | --- | --- | --- |
@@ -147,13 +129,11 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)
 
-## Development
+## Contributing
 
-```bash
-npm install
-npm test   # unit tests; the end-to-end test also runs when gcc, gdb,
-           # CRASHLENS_REA and REA_PWNTOOLS_PYTHON are available
-```
+Real crashes are the most useful contribution: open an issue with the report
+(or the core and binary, if you can share them). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

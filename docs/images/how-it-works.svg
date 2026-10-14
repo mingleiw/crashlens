@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <rect width="960" height="300" rx="16" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="959" height="299" rx="16" fill="none" stroke="#d0d7de"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#8c959f"/></marker>
+  </defs>
+
+  <!-- Inputs -->
+  <text x="40" y="44" font-size="13" font-weight="700" fill="#57606a" letter-spacing="1.2">WHAT THE CRASH LEFT</text>
+  <rect x="40" y="62" width="180" height="70" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="130" y="94" font-size="16" font-weight="700" fill="#1f2328" text-anchor="middle">core dump</text>
+  <text x="130" y="116" font-size="12.5" fill="#57606a" text-anchor="middle">memory at the crash</text>
+  <rect x="40" y="152" width="180" height="70" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="130" y="184" font-size="16" font-weight="700" fill="#1f2328" text-anchor="middle">binary</text>
+  <text x="130" y="206" font-size="12.5" fill="#57606a" text-anchor="middle">the build that crashed</text>
+
+  <!-- Analysis -->
+  <text x="300" y="44" font-size="13" font-weight="700" fill="#57606a" letter-spacing="1.2">READ, NEVER RUN</text>
+  <rect x="300" y="62" width="200" height="70" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="400" y="92" font-size="16" font-weight="700" fill="#0a3069" text-anchor="middle">REA</text>
+  <text x="400" y="114" font-size="12.5" fill="#0a3069" text-anchor="middle">signal · registers · symbols</text>
+  <rect x="300" y="152" width="200" height="70" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-dasharray="5 4"/>
+  <text x="400" y="182" font-size="16" font-weight="700" fill="#1f2328" text-anchor="middle">gdb <tspan font-size="12.5" font-weight="400" fill="#57606a">(optional)</tspan></text>
+  <text x="400" y="204" font-size="12.5" fill="#57606a" text-anchor="middle">backtrace · disassembly</text>
+
+  <!-- crashlens -->
+  <text x="580" y="44" font-size="13" font-weight="700" fill="#57606a" letter-spacing="1.2">CRASHLENS</text>
+  <rect x="580" y="62" width="160" height="160" rx="12" fill="#fbefff" stroke="#c297ff"/>
+  <text x="660" y="100" font-size="16" font-weight="700" fill="#3e1f79" text-anchor="middle">figure out why</text>
+  <g font-size="12.5" fill="#3e1f79" text-anchor="middle">
+    <text x="660" y="130">address → function</text>
+    <text x="660" y="152">classify the crash</text>
+    <text x="660" y="174">registers involved</text>
+    <text x="660" y="196">duplicate signature</text>
+  </g>
+
+  <!-- Output -->
+  <text x="800" y="44" font-size="13" font-weight="700" fill="#57606a" letter-spacing="1.2">YOU GET</text>
+  <rect x="800" y="62" width="120" height="160" rx="10" fill="#dafbe1" stroke="#4ac26b"/>
+  <text x="860" y="122" font-size="16" font-weight="700" fill="#044f1e" text-anchor="middle">bug report</text>
+  <text x="860" y="146" font-size="12.5" fill="#044f1e" text-anchor="middle">Markdown</text>
+  <text x="860" y="166" font-size="12.5" fill="#044f1e" text-anchor="middle">or JSON</text>
+
+  <!-- Arrows -->
+  <g stroke="#8c959f" stroke-width="2" fill="none" marker-end="url(#a)">
+    <path d="M220 97 H296"/>
+    <path d="M220 187 H296"/>
+    <path d="M220 110 L296 176"/>
+    <path d="M220 174 L296 112"/>
+    <path d="M500 97 H576"/>
+    <path d="M500 187 H576"/>
+    <path d="M740 142 H796"/>
+  </g>
+
+  <text x="480" y="270" font-size="14" fill="#57606a" text-anchor="middle">No logs, SDK or source code needed. Every claim in the report points back to evidence from the crash.</text>
+</svg>
