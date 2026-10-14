@@ -1,0 +1,6 @@
+
+thread 'main' (1484) panicked at src/main.rs:34:21:
+assertion `left == right` failed: unexpected arg count
+  left: 2
+ right: 9
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

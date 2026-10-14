@@ -1,0 +1,21 @@
+
+thread 'main' (773) panicked at src/main.rs:32:24:
+RefCell already borrowed
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+   2: core::cell::panic_already_borrowed::do_panic::runtime
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic.rs:172:21
+   3: core::cell::panic_already_borrowed::do_panic
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/intrinsics/mod.rs:2450:9
+   4: core::cell::panic_already_borrowed
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic.rs:177:9
+   5: <core::cell::RefCell<i32>>::borrow_mut
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/cell.rs:1224:25
+   6: rsapp::main
+             at ./src/main.rs:32:24
+   7: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

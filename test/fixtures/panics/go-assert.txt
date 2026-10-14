@@ -1,0 +1,5 @@
+panic: interface conversion: interface {} is string, not int
+
+goroutine 1 [running]:
+main.main()
+	/home/dev/shop/main.go:39 +0x287

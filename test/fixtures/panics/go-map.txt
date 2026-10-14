@@ -1,0 +1,5 @@
+panic: assignment to entry in nil map
+
+goroutine 1 [running]:
+main.main()
+	/home/dev/shop/main.go:32 +0xe5

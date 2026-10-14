@@ -9,7 +9,8 @@ import {
   type BinaryLayout,
   type RecordedCrash,
 } from "../src/rea.js";
-import { renderMarkdown } from "../src/report.js";
+import { toCoreIssue } from "../src/coreIssue.js";
+import { renderIssueMarkdown } from "../src/issue.js";
 import { createSymbolizer } from "../src/symbolize.js";
 import { buildReport } from "../src/triage.js";
 
@@ -396,7 +397,7 @@ describe("buildReport", () => {
       first.value.relevantRegisters.map((entry) => entry.name),
       ["rax"],
     );
-    const markdown = renderMarkdown(first.value);
+    const markdown = renderIssueMarkdown(toCoreIssue(first.value));
     assert.match(markdown, /^# Crash: NULL pointer dereference in `sum\+0x31`/);
     assert.match(markdown, /#1 0x556fdda1b26a\s+main\+0x75/);
     assert.match(markdown, /`rax` = `0x0` ← NULL/);
@@ -435,7 +436,7 @@ describe("buildReport", () => {
     );
     assert.ok(report.ok);
     assert.equal(report.value.firstOwnFrame?.index, 1);
-    const markdown = renderMarkdown(report.value);
+    const markdown = renderIssueMarkdown(toCoreIssue(report.value));
     assert.match(markdown, /in `main\+0x75`/);
     assert.match(markdown, /inside `__strlen_evex`, called from `main\+0x75`/);
     assert.match(markdown, /\| Source \| `parser.c:13` \|/);

@@ -29,9 +29,10 @@ Include the crashlens version (`git rev-parse --short HEAD`), your distro,
 
 Good first areas:
 
-- new crash classes in `src/classify.ts` (with a test)
+- new crash classes in `src/classify.ts` or panic rules in `src/panicIssue.ts`
+  (with a test; for panics, add real captured output to `test/fixtures/panics/`)
 - clearer explanations or next steps in reports
-- Go/Rust panic text and other inputs from the [roadmap](README.md#roadmap)
+- new inputs from the [roadmap](README.md#roadmap), e.g. Python or Node tracebacks
 - docs: getting core dumps on different distros and containers
 
 For larger changes, open an issue first so we can agree on the approach.
@@ -63,17 +64,30 @@ skipped with a message saying what's missing.
 
 ```
 src/
-  cli.ts        argument parsing, output, exit codes
-  triage.ts     combines everything into one report
-  rea.ts        runs the REA CLI and parses the facts we use
-  ntFile.ts     parses the core's list of mapped files (NT_FILE)
-  symbolize.ts  load bias + symbols: runtime address → function+offset
-  gdb.ts        optional gdb backtrace and disassembly (core file only)
-  classify.ts   crash type, explanation, next steps, confidence
-  report.ts     Markdown and JSON rendering
+  cli.ts          modes (core, panic text, --batch), output, exit codes
+  issue.ts        the shared Issue model + Markdown/JSON rendering
+  batch.ts        find crashes in a folder, triage, group by signature
+
+  # core dumps
+  triage.ts       combines REA, symbols and gdb into one core report
+  coreIssue.ts    core report → Issue
+  rea.ts          runs the REA CLI and parses the facts we use
+  ntFile.ts       parses the core's list of mapped files (NT_FILE)
+  symbolize.ts    load bias + symbols: runtime address → function+offset
+  gdb.ts          optional gdb backtrace and disassembly (core file only)
+  classify.ts     signal → crash type, explanation, next steps, confidence
+
+  # panics
+  panic.ts        parses Go and Rust panic output into frames
+  panicIssue.ts   panic rules (message → diagnosis) and panic → Issue
 test/
-  unit.test.ts  pure logic, using fixtures shaped like real REA/gdb output
-  e2e.test.ts   compiles, crashes and triages a real program
+  unit.test.ts    core-dump logic, using fixtures shaped like real REA/gdb output
+  panic.test.ts   panics and batch, using real Go 1.24 / Rust 1.97 output
+  fixtures/       captured panic output (paths anonymized)
+  e2e.test.ts     compiles, crashes and triages real C and Go programs
+
+To add a new input type (say, Python tracebacks), parse it into frames and
+build an `Issue`. Rendering, JSON and batch grouping then work unchanged.
 ```
 
 ## Principles

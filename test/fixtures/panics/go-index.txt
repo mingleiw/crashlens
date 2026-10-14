@@ -1,0 +1,7 @@
+panic: runtime error: index out of range [5] with length 3
+
+goroutine 1 [running]:
+main.pick(...)
+	/home/dev/shop/main.go:19
+main.main()
+	/home/dev/shop/main.go:29 +0x365

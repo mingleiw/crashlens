@@ -5,10 +5,10 @@
 
 **Logs tell you where your program was. crashlens tells you why it died.**
 
-When a native program crashes, the logs usually just stop. crashlens reads what
-the crash left behind, the core dump and the binary, and writes a bug report
-you can paste into an issue. It never runs your program, needs no SDK, and
-doesn't need your source code.
+When a program crashes, the logs usually just stop. crashlens reads what the
+crash left behind (a core dump, or a Go/Rust panic message) and writes a bug
+report you can paste into an issue. It never runs your program and needs no SDK.
+Point it at a folder of crashes and it groups them into distinct bugs.
 
 ![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
 
@@ -22,11 +22,21 @@ crashlens ./core ./parser > crash.md
 <img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
 </details>
 
-> **Status:** early prototype. Linux x86-64 core dumps from native programs
-> (C, C++, Rust, Go). Got a crash that stumped you? Open an issue. Real
+> **Status:** early prototype. Reads Linux x86-64 core dumps (C, C++, Rust, Go)
+> and Go/Rust panic output. Got a crash that stumped you? Open an issue. Real
 > crashes are the best test cases.
 
+## Three ways to use it
+
+```bash
+crashlens ./core ./app                 # a native crash: core dump + the binary
+go run . 2>&1 | crashlens -            # a Go or Rust panic, piped in (or saved to a file)
+crashlens --batch ./crashes ./app      # a folder of crashes, grouped into distinct bugs
+```
+
 ## What it recognizes
+
+**Native crashes (core dumps)**
 
 - NULL and near-NULL pointer dereferences
 - stack overflow (runaway recursion, huge stack buffers)
@@ -35,11 +45,46 @@ crashlens ./core ./parser > crash.md
 - failed `assert()`, uncaught C++ exceptions, glibc heap-corruption aborts
 - divide by zero, illegal instruction, bus error, trap
 
-If the crash happens inside a library, say `strlen(NULL)` in libc, the report
-points at **your** function that called it.
+**Go panics**: nil pointer dereference, index/slice out of range, write to nil
+map, divide by zero, failed type assertion, concurrent map access, deadlock,
+closed-channel misuse, stack overflow, explicit `panic(...)`
+
+**Rust panics**: `unwrap()` on `None`/`Err` (with the error value), index and
+slice out of bounds, arithmetic overflow, divide by zero, `RefCell` borrowed
+twice, failed `assert!`, string sliced inside a character, explicit `panic!`/`expect`
+
+The report always points at **your** code first: for a native crash inside libc
+(say `strlen(NULL)`) it names your function that called it, and for panics it
+skips runtime and standard-library frames.
 
 Every report has a **signature** built from the crash type and top frame names
-(never addresses), so the same bug groups together across runs and machines.
+(never addresses or directories), so the same bug groups together across runs
+and machines.
+
+## Batch: a folder of crashes, ranked
+
+```bash
+crashlens --batch ./crashes ./app > crashes.md
+```
+
+crashlens finds every core dump and panic log under the folder (by content, not
+file name), triages each one, and groups them by signature:
+
+```markdown
+# crashlens: 9 failures, 5 distinct bugs
+
+| # | Bug                      | Where               | Count | Signature      |
+| - | ------------------------ | ------------------- | ----- | -------------- |
+| 1 | NULL pointer dereference | `name_length+0x1b`  | **3** | `2f70bec8d691` |
+| 2 | Integer divide by zero   | `ratio+0x12`        | **2** | `e602c2811b65` |
+| 3 | Nil pointer dereference  | `main.total`        | **2** | `46dd5b7c6285` |
+| 4 | Assertion failure        | `main+0xfe`         | **1** | `49a54a814e72` |
+| 5 | Unwrap on Err            | `rsapp::parse_port` | **1** | `553fb510e0f8` |
+```
+
+Each bug then gets a section with the affected files and the full report.
+Files it can't use are listed with the reason. The binary is only needed when
+the folder contains core dumps.
 
 ## How it works
 
@@ -96,7 +141,9 @@ On systemd distros cores often go to systemd-coredump instead:
 ## Usage
 
 ```
-crashlens <core> <binary> [--json] [-o FILE] [--no-gdb] [--gdb PATH]
+crashlens <core> <binary>          [options]
+crashlens <panic.txt | ->          [options]
+crashlens --batch <dir> [binary]   [options]
 ```
 
 | Option | Meaning |
@@ -106,7 +153,7 @@ crashlens <core> <binary> [--json] [-o FILE] [--no-gdb] [--gdb PATH]
 | `--no-gdb` | skip gdb (no backtrace or disassembly) |
 | `--gdb PATH` | use a specific gdb |
 
-Environment: `CRASHLENS_REA` points at a specific REA (a `rea` executable or a
+Panic text needs nothing else installed. For core dumps: `CRASHLENS_REA` points at a specific REA (a `rea` executable or a
 `scripts/rea.mjs` checkout). `REA_PWNTOOLS_PYTHON` is required by REA.
 
 Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
@@ -118,13 +165,17 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - The binary is matched to the core **by file name**. Pass the exact build that
   crashed. If gdb detects a mismatch, the report shows a warning.
 - Without gdb there's no backtrace, only the faulting frame.
+- Panics are read from text only. "Your code" is decided by package and crate
+  names, and Rust needs `RUST_BACKTRACE=1` for a stack trace.
 - Crash types are heuristics and say how confident they are.
 - Reports include local paths and register values. Review before posting publicly.
 
 ## Roadmap
 
-- [ ] Group a folder of crashes by signature (`--batch`)
-- [ ] Go and Rust panic text, JS/Node exceptions with source maps
+- [x] Group a folder of crashes by signature (`--batch`)
+- [x] Go and Rust panic text
+- [ ] JS/Node, Python and Java exceptions
+- [ ] Verify the binary matches the core by build ID
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)

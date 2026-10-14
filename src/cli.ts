@@ -1,31 +1,40 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { renderBatchMarkdown, triageBatch } from "./batch.js";
+import { coreDetails, toCoreIssue } from "./coreIssue.js";
+import { renderIssueMarkdown, toJson } from "./issue.js";
+import { parsePanic } from "./panic.js";
+import { toPanicIssue } from "./panicIssue.js";
 import { resolveReaCommand } from "./rea.js";
-import { renderJson, renderMarkdown } from "./report.js";
 import { triage } from "./triage.js";
 
-const USAGE = `crashlens — turn a Linux core dump into a bug report, without running the program
+const USAGE = `crashlens: find out why your program crashed, without running it
 
-Usage: crashlens <core> <binary> [options]
-
-Arguments:
-  core     Linux x86-64 ELF core file
-  binary   The executable that crashed (same build as the one that produced the core)
+Usage:
+  crashlens <core> <binary>          Linux x86-64 core dump + the binary that crashed
+  crashlens <panic.txt>              Go or Rust panic output saved to a file
+  crashlens -                        ... or piped in:  go run . 2>&1 | crashlens -
+  crashlens --batch <dir> [binary]   every core dump and panic log under <dir>,
+                                     grouped into distinct bugs
 
 Options:
-  --json             Print the report as JSON instead of Markdown
+  --json             Print JSON instead of Markdown
   -o, --output FILE  Write the report to FILE instead of stdout
-  --no-gdb           Do not use gdb (no backtrace or disassembly)
+  --no-gdb           Do not use gdb for core dumps (no backtrace or disassembly)
   --gdb PATH         gdb executable to use (default: gdb)
   -h, --help         Show this help
 
-Environment:
+Environment (core dumps only):
   CRASHLENS_REA         REA executable or scripts/rea.mjs path (default: installed rea-agents, then rea)
   REA_PWNTOOLS_PYTHON   Python with pwntools, required by REA's core reader
 
 Exit codes: 0 report produced, 1 triage failed, 2 invalid arguments.`;
+
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+
+type Output = { readonly ok: true; readonly text: string } | { readonly ok: false; readonly message: string };
 
 async function main(argv: readonly string[]): Promise<number> {
   let parsed;
@@ -36,6 +45,7 @@ async function main(argv: readonly string[]): Promise<number> {
       options: {
         json: { type: "boolean", default: false },
         output: { type: "string", short: "o" },
+        batch: { type: "string" },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false },
@@ -50,34 +60,69 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
-  const [core, binary] = positionals;
-  if (core === undefined || binary === undefined || positionals.length > 2) {
-    process.stderr.write(`Expected <core> and <binary>.\n\n${USAGE}\n`);
-    return 2;
-  }
-
   // REA requires absolute paths; resolve once at the boundary.
   const absolute = (path: string) => (isAbsolute(path) ? path : resolve(path));
-  const result = await triage({
-    corePath: absolute(core),
-    binaryPath: absolute(binary),
-    rea: resolveReaCommand(),
-    gdb: values["no-gdb"] ? null : values.gdb,
-  });
-  if (!result.ok) {
-    process.stderr.write(`crashlens: ${result.error.message}\n`);
-    if (values.json)
-      process.stdout.write(
-        `${JSON.stringify({ error: result.error }, null, 2)}\n`,
-      );
+  const gdb = values["no-gdb"] ? null : values.gdb;
+
+  let output: Output;
+  if (values.batch !== undefined) {
+    if (positionals.length > 1) return usage("--batch takes a directory and at most one binary.");
+    const result = await triageBatch({
+      directory: absolute(values.batch),
+      binaryPath: positionals[0] === undefined ? null : absolute(positionals[0]),
+      rea: resolveReaCommand(),
+      gdb,
+    });
+    output = { ok: true, text: values.json ? `${toJson(result)}\n` : renderBatchMarkdown(result) };
+  } else if (positionals.length === 2) {
+    const [core, binary] = positionals as [string, string];
+    const result = await triage({ corePath: absolute(core), binaryPath: absolute(binary), rea: resolveReaCommand(), gdb });
+    output = result.ok
+      ? {
+          ok: true,
+          text: values.json
+            ? `${toJson({ issue: toCoreIssue(result.value), details: coreDetails(result.value) })}\n`
+            : renderIssueMarkdown(toCoreIssue(result.value)),
+        }
+      : { ok: false, message: result.error.message };
+  } else if (positionals.length === 1) {
+    output = panicReport(positionals[0] as string, values.json);
+  } else {
+    return usage("Expected <core> <binary>, a panic file, or --batch <dir>.");
+  }
+
+  if (!output.ok) {
+    process.stderr.write(`crashlens: ${output.message}\n`);
+    if (values.json) process.stdout.write(`${toJson({ error: output.message })}\n`);
     return 1;
   }
-  const text = values.json
-    ? `${renderJson(result.value)}\n`
-    : renderMarkdown(result.value);
-  if (values.output === undefined) process.stdout.write(text);
-  else writeFileSync(values.output, text);
+  if (values.output === undefined) process.stdout.write(output.text);
+  else writeFileSync(values.output, output.text);
   return 0;
+}
+
+function panicReport(path: string, json: boolean): Output {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path === "-" ? 0 : path);
+  } catch (error) {
+    return { ok: false, message: `Could not read ${path}: ${(error as Error).message}` };
+  }
+  if (bytes.subarray(0, 4).equals(ELF_MAGIC))
+    return {
+      ok: false,
+      message: `${path} is an ELF file. For a core dump, also pass the binary that crashed: crashlens ${path} <binary>`,
+    };
+  const text = bytes.toString("utf8");
+  const parsed = parsePanic(text);
+  if (!parsed.ok) return { ok: false, message: parsed.error.message };
+  const issue = toPanicIssue(parsed.value, path === "-" ? "stdin" : path, text);
+  return { ok: true, text: json ? `${toJson({ issue, details: parsed.value })}\n` : renderIssueMarkdown(issue) };
+}
+
+function usage(message: string): number {
+  process.stderr.write(`${message}\n\n${USAGE}\n`);
+  return 2;
 }
 
 process.exitCode = await main(process.argv.slice(2));

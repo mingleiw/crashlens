@@ -1,0 +1,5 @@
+panic: invalid order state: 42
+
+goroutine 1 [running]:
+main.main()
+	/home/dev/shop/main.go:36 +0x26d

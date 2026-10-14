@@ -1,0 +1,491 @@
+fatal error: concurrent map writes
+
+goroutine 28 [running]:
+internal/runtime/maps.fatal({0x4b9403?, 0x0?})
+	/usr/local/go1.24.7/src/runtime/panic.go:1058 +0x18
+main.main.func1(0x16)
+	/home/dev/shop/main.go:51 +0x65
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 1 [runnable]:
+sync.(*WaitGroup).Add(0xc000010100?, 0x1?)
+	/usr/local/go1.24.7/src/sync/waitgroup.go:45 +0xdd
+main.main()
+	/home/dev/shop/main.go:47 +0x2bf
+
+goroutine 6 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 7 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 8 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 9 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 10 [runnable]:
+internal/runtime/maps.(*table).uncheckedPutSlot(0xc0001820a0?, 0x4a3720?, 0xf1c31ae7d657304c?, 0xc000190008?, 0xc000190010?)
+	/usr/local/go1.24.7/src/internal/runtime/maps/table.go:376 +0x1ae
+internal/runtime/maps.(*table).grow(0xc000182080, 0x4a3720, 0xc0001000f0, 0x80?)
+	/usr/local/go1.24.7/src/internal/runtime/maps/table.go:1115 +0x178
+internal/runtime/maps.(*table).rehash(0xc0001000f0?, 0x4a3720?, 0x0?)
+	/usr/local/go1.24.7/src/internal/runtime/maps/table.go:1027 +0x25
+main.main.func1(0x4)
+	/home/dev/shop/main.go:51 +0x65
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 11 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 12 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 13 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 14 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 15 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 16 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 17 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 18 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 19 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 20 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 21 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 22 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 23 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 24 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 25 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 26 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 27 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 29 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 30 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 31 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 32 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 33 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 34 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 35 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 36 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 37 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 38 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 39 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 40 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 41 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 42 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 43 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 44 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 45 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 46 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 47 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 48 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 49 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 50 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 51 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 52 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 53 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 54 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 55 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 56 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 57 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 58 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 59 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 60 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 61 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 62 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 63 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 64 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299
+
+goroutine 65 [runnable]:
+main.main.gowrap1()
+	/home/dev/shop/main.go:48
+runtime.goexit({})
+	/usr/local/go1.24.7/src/runtime/asm_amd64.s:1700 +0x1
+created by main.main in goroutine 1
+	/home/dev/shop/main.go:48 +0x299

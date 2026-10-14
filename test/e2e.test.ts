@@ -77,3 +77,41 @@ describe(
     });
   },
 );
+
+const GO_SOURCE = `package main
+
+type Order struct{ Items []int }
+
+func total(o *Order) int { return len(o.Items) }
+
+func main() {
+	var o *Order
+	println(total(o))
+}
+`;
+
+describe(
+  "crashlens end to end: Go panic from stdin",
+  { skip: !has("go") && "needs go" },
+  () => {
+    it("turns piped panic output into an issue naming the function", () => {
+      const work = mkdtempSync(join(tmpdir(), "crashlens-go-"));
+      try {
+        writeFileSync(join(work, "main.go"), GO_SOURCE);
+        writeFileSync(join(work, "go.mod"), "module example.com/e2e\n\ngo 1.21\n");
+        // Inlining would fold total() into main(); keep the frame.
+        execFileSync("go", ["build", "-gcflags=all=-l", "-o", "app", "."], { cwd: work });
+        const run = spawnSync(join(work, "app"), { cwd: work, encoding: "utf8" });
+        assert.notEqual(run.status, 0);
+        const markdown = execFileSync(process.execPath, [cli, "-"], {
+          input: run.stderr,
+          encoding: "utf8",
+        });
+        assert.match(markdown, /^# Panic: Nil pointer dereference in `main.total`/);
+        assert.match(markdown, /→ #0 main.total/);
+      } finally {
+        rmSync(work, { recursive: true, force: true });
+      }
+    });
+  },
+);
