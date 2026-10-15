@@ -8,6 +8,7 @@ import { renderIssueMarkdown, toJson, withLog, type Issue } from "./issue.js";
 import { parseFailure } from "./failure.js";
 import { logContext, toFailureIssue } from "./failureIssue.js";
 import { resolveReaCommand } from "./rea.js";
+import { serve } from "./server.js";
 import { attachSource } from "./source.js";
 import { triage } from "./triage.js";
 
@@ -18,6 +19,7 @@ Usage:
   crashlens <error.log>              A saved log containing a Go/Rust panic, a Python,
                                      Java or Node exception, or a sanitizer report
   crashlens -                        ... or piped in:  python app.py 2>&1 | crashlens -
+  crashlens serve [--port N]         Local web app: drag and drop crashes in your browser
   crashlens --batch <dir> [binary]   every core dump and failure log under <dir>,
                                      grouped into distinct bugs
 
@@ -52,6 +54,7 @@ async function main(argv: readonly string[]): Promise<number> {
         batch: { type: "string" },
         log: { type: "string" },
         source: { type: "string" },
+        port: { type: "string" },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false },
@@ -72,6 +75,21 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const source = values.source === undefined ? null : absolute(values.source);
   const enrich = async (issue: Issue) => (source === null ? issue : attachSource(issue, source));
+
+  if (positionals[0] === "serve" && positionals.length === 1 && values.batch === undefined) {
+    const port = values.port === undefined ? 7777 : Number(values.port);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) return usage("--port must be a number between 0 and 65535.");
+    const server = await serve({ port, rea: resolveReaCommand(), gdb, sourceRoot: source });
+    process.stdout.write(
+      `crashlens is running at:\n\n  ${server.url}\n\nOpen that exact URL (it carries a private session token). Only this computer can connect.\nPress Ctrl+C to stop; uploaded files are deleted on exit.\n`,
+    );
+    await new Promise<void>((resolve) => {
+      const stop = () => void server.close().then(resolve);
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+    return 0;
+  }
 
   let output: Output;
   if (values.batch !== undefined) {

@@ -66,7 +66,7 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
     });
   }
   if (snippets.length === 0)
-    return { ...issue, warnings: [...issue.warnings, `No failing line could be found under the source folder \`${root}\`.`] };
+    return { ...issue, evidence: [...issue.evidence, `Source: none of the failing lines were found under \`${root}\``] };
 
   const sections: IssueSection[] = snippets.map((s) => ({
     heading: `Code: ${s.path}:${s.location.line} (${s.location.function})`,

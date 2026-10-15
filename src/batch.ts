@@ -1,6 +1,7 @@
-import { open, readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { toCoreIssue } from "./coreIssue.js";
+import { detectFile } from "./fileKind.js";
 import { issueTitle, renderIssueMarkdown, type Issue } from "./issue.js";
 import { parseFailure } from "./failure.js";
 import { toFailureIssue } from "./failureIssue.js";
@@ -34,9 +35,6 @@ export interface BatchResult {
 }
 
 const MAX_DEPTH = 4;
-/** Panic text files larger than this are skipped rather than read. */
-const MAX_TEXT_BYTES = 8 * 1024 * 1024;
-const ET_CORE = 4;
 
 type Candidate =
   | { readonly kind: "core"; readonly path: string }
@@ -182,24 +180,17 @@ async function listFiles(directory: string, depth = 0): Promise<string[]> {
   return files;
 }
 
-/** Classify by content, not name: ELF ET_CORE, or small text files. */
 async function detect(path: string): Promise<Candidate> {
-  const handle = await open(path, "r");
-  try {
-    const head = Buffer.alloc(18);
-    const { bytesRead } = await handle.read(head, 0, 18, 0);
-    if (bytesRead >= 18 && head.readUInt32BE(0) === 0x7f454c46)
-      return head.readUInt16LE(16) === ET_CORE
-        ? { kind: "core", path }
-        : { kind: "skip", path, reason: "ELF file that is not a core dump" };
-    const size = (await stat(path)).size;
-    if (size > MAX_TEXT_BYTES)
-      return { kind: "skip", path, reason: "larger than 8 MiB and not a core dump" };
-    if (head.subarray(0, bytesRead).includes(0))
-      return { kind: "skip", path, reason: "binary file that is not a core dump" };
-    return { kind: "text", path };
-  } finally {
-    await handle.close();
+  const found = await detectFile(path);
+  switch (found.kind) {
+    case "core":
+      return { kind: "core", path };
+    case "text":
+      return { kind: "text", path };
+    case "binary":
+      return { kind: "skip", path, reason: "ELF file that is not a core dump" };
+    case "other":
+      return { kind: "skip", path, reason: found.reason };
   }
 }
 

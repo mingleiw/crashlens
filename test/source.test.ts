@@ -70,7 +70,7 @@ describe("attachSource", () => {
       root,
     );
     assert.ok(!JSON.stringify(issue.sections).includes("top secret"));
-    assert.match(issue.warnings.at(-1) ?? "", /No failing line could be found/);
+    assert.match(issue.evidence.at(-1) ?? "", /none of the failing lines were found/);
   });
 
   it("skips library frames and works without git", async () => {
