@@ -62,6 +62,12 @@ export type IssueSection =
       readonly heading: string;
       readonly kind: "list";
       readonly items: readonly string[];
+    }
+  | {
+      /** Free-form Markdown (e.g. an AI suggestion), rendered as-is. */
+      readonly heading: string;
+      readonly kind: "markdown";
+      readonly markdown: string;
     };
 
 /** Full issue title, e.g. "Crash: NULL pointer dereference in `sum+0x31`". */
@@ -106,6 +112,7 @@ export function renderIssueMarkdown(issue: Issue, depth = 0): string {
     lines.push(`${h(2)} ${section.heading}`, "");
     if (section.kind === "code")
       lines.push("```" + section.language, ...section.lines, "```", "");
+    else if (section.kind === "markdown") lines.push(section.markdown, "");
     else lines.push(...section.items.map((item) => `- ${item}`), "");
   }
   lines.push(

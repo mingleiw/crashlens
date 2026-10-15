@@ -69,6 +69,7 @@ src/
   batch.ts          find crashes in a folder, triage, group by signature
   fileKind.ts       content-based detection: core dump, executable, text
   source.ts         --source: map frames to repo files, snippets, git blame
+  ai.ts             --ai: optional Claude explanation + fix (Anthropic SDK)
   server.ts         crashlens serve: localhost HTTP API, token + Host checks
   web/page.ts       the browser UI (HTML/CSS/JS, no external resources)
 
@@ -92,6 +93,7 @@ test/
   failure.test.ts   Python, Java, Node and sanitizer output, log context
   source.test.ts    snippets, blame, and the source-folder boundary
   server.test.ts    web API access control and uploads
+  ai.test.ts        AI request shape and error handling, against a fake API
   fixtures/         real captured output (paths anonymized)
   e2e.test.ts       compiles, crashes and triages real C and Go programs
 
@@ -117,6 +119,9 @@ These keep crashlens trustworthy. PRs should preserve them.
 - **Use REA through its public CLI.** Don't depend on REA internals. If REA
   doesn't expose something, parse it in one place here (like `ntFile.ts`) or
   propose it upstream.
+- **AI is opt-in and labeled.** Nothing leaves the machine unless the user
+  passes `--ai` (and, in the web app, confirms per report). Only the rendered
+  report is sent, and AI output is always marked as AI-generated.
 - **Stable signatures.** Signatures must not include addresses, paths or
   anything else that changes between runs.
 

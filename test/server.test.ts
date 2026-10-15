@@ -121,6 +121,13 @@ describe("crashlens serve: analysis", () => {
     assert.equal(JSON.parse((await set("")).body).sourceRoot, null);
   });
 
+  it("refuses AI suggestions unless started with --ai", async () => {
+    const reply = await call("POST", "/api/ai", { body: JSON.stringify({ id: "x" }) });
+    assert.equal(reply.status, 403);
+    assert.match(JSON.parse(reply.body).error, /Start crashlens with --ai/);
+    assert.equal(JSON.parse((await call("GET", "/api/state")).body).aiEnabled, false);
+  });
+
   it("clears the session", async () => {
     await call("POST", "/api/clear");
     const state = JSON.parse((await call("GET", "/api/state")).body) as { issues: unknown[]; uploads: unknown[] };

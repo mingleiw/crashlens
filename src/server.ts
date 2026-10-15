@@ -11,6 +11,7 @@ import { logContext, toFailureIssue } from "./failureIssue.js";
 import { detectFile, MAX_TEXT_BYTES, type FileKind } from "./fileKind.js";
 import { renderIssueMarkdown, withLog, type Issue } from "./issue.js";
 import type { ReaCommand } from "./rea.js";
+import { suggestFix, withSuggestion } from "./ai.js";
 import { attachSource } from "./source.js";
 import { triage } from "./triage.js";
 import { APP_CSS, APP_JS, INDEX_HTML } from "./web/page.js";
@@ -20,6 +21,8 @@ export interface ServeOptions {
   readonly rea: ReaCommand;
   readonly gdb: string | null;
   readonly sourceRoot: string | null;
+  /** Enables "Ask AI"; each request still needs the user's click and confirmation. */
+  readonly ai?: boolean;
   /** Largest accepted upload; core dumps can be big. */
   readonly maxUploadBytes?: number;
 }
@@ -42,8 +45,8 @@ interface Analyzed {
   readonly id: string;
   readonly name: string;
   readonly at: string;
-  readonly issue: Issue;
-  readonly markdown: string;
+  issue: Issue;
+  markdown: string;
 }
 
 const MAX_JSON_BYTES = MAX_TEXT_BYTES * 2;
@@ -86,6 +89,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const routes: Record<string, (req: IncomingMessage, url: URL) => Promise<unknown>> = {
     "GET /api/state": async () => ({
       sourceRoot,
+      aiEnabled: options.ai === true,
       issues: analyzed,
       uploads: [...uploads.values()].map(({ path: _path, ...rest }) => rest),
     }),
@@ -156,6 +160,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (info === null || !info.isDirectory()) throw new HttpError(400, "That folder doesn't exist.");
       sourceRoot = path;
       return { sourceRoot };
+    },
+    "POST /api/ai": async (req) => {
+      if (options.ai !== true) throw new HttpError(403, "AI suggestions are off. Start crashlens with --ai to enable them.");
+      const body = await readJson(req);
+      const entry = analyzed.find((a) => a.id === body["id"]);
+      if (entry === undefined) throw new HttpError(404, "Unknown report.");
+      const result = await suggestFix(entry.issue);
+      if (!result.ok) throw new HttpError(502, result.error.message);
+      entry.issue = withSuggestion(entry.issue, result.value);
+      entry.markdown = renderIssueMarkdown(entry.issue);
+      return entry;
     },
     "POST /api/clear": async () => {
       analyzed.length = 0;

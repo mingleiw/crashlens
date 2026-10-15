@@ -8,6 +8,7 @@ import { renderIssueMarkdown, toJson, withLog, type Issue } from "./issue.js";
 import { parseFailure } from "./failure.js";
 import { logContext, toFailureIssue } from "./failureIssue.js";
 import { resolveReaCommand } from "./rea.js";
+import { suggestFix, withSuggestion } from "./ai.js";
 import { serve } from "./server.js";
 import { attachSource } from "./source.js";
 import { triage } from "./triage.js";
@@ -24,6 +25,9 @@ Usage:
                                      grouped into distinct bugs
 
 Options:
+  --ai               Off by default. Send the report to the Anthropic API (Claude) for an
+                     explanation and suggested fix; needs ANTHROPIC_API_KEY. With serve,
+                     enables an "Ask AI" button that asks before sending each report.
   --json             Print JSON instead of Markdown
   -o, --output FILE  Write the report to FILE instead of stdout
   --source DIR       Your source code: show the failing lines and who last changed them
@@ -55,6 +59,7 @@ async function main(argv: readonly string[]): Promise<number> {
         log: { type: "string" },
         source: { type: "string" },
         port: { type: "string" },
+        ai: { type: "boolean", default: false },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false },
@@ -75,11 +80,20 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const source = values.source === undefined ? null : absolute(values.source);
   const enrich = async (issue: Issue) => (source === null ? issue : attachSource(issue, source));
+  /** Only with --ai, only for single reports: the user asked for this one to be sent. */
+  const advise = async (issue: Issue): Promise<Issue> => {
+    if (!values.ai) return issue;
+    process.stderr.write("crashlens: sending this report to the Anthropic API for a suggestion (--ai)…\n");
+    const suggestion = await suggestFix(issue);
+    if (suggestion.ok) return withSuggestion(issue, suggestion.value);
+    process.stderr.write(`crashlens: AI suggestion unavailable: ${suggestion.error.message}\n`);
+    return { ...issue, warnings: [...issue.warnings, `AI suggestion unavailable: ${suggestion.error.message}`] };
+  };
 
   if (positionals[0] === "serve" && positionals.length === 1 && values.batch === undefined) {
     const port = values.port === undefined ? 7777 : Number(values.port);
     if (!Number.isInteger(port) || port < 0 || port > 65535) return usage("--port must be a number between 0 and 65535.");
-    const server = await serve({ port, rea: resolveReaCommand(), gdb, sourceRoot: source });
+    const server = await serve({ port, rea: resolveReaCommand(), gdb, sourceRoot: source, ai: values.ai });
     process.stdout.write(
       `crashlens is running at:\n\n  ${server.url}\n\nOpen that exact URL (it carries a private session token). Only this computer can connect.\nPress Ctrl+C to stop; uploaded files are deleted on exit.\n`,
     );
@@ -111,6 +125,7 @@ async function main(argv: readonly string[]): Promise<number> {
         const log = readFileSync(values.log, "utf8");
         issue = withLog(issue, logContext(log, log.length));
       }
+      issue = await advise(issue);
       output = {
         ok: true,
         text: values.json
@@ -121,7 +136,7 @@ async function main(argv: readonly string[]): Promise<number> {
   } else if (positionals.length === 1) {
     const parsed = readFailure(positionals[0] as string);
     if (parsed.ok) {
-      const issue = await enrich(parsed.issue);
+      const issue = await advise(await enrich(parsed.issue));
       output = {
         ok: true,
         text: values.json ? `${toJson({ issue, details: parsed.details })}\n` : renderIssueMarkdown(issue),

@@ -109,6 +109,26 @@ and machines.
   `/srv/releases/42/app/orders.py` are matched to `app/orders.py`; Java files
   are found by package. Only files inside that folder are read.
 - **Evidence**: hashes of every input and how each fact was obtained.
+- **Optional AI fix** (off by default): with `--ai`, Claude reads the report
+  and suggests a fix, clearly labeled as AI-generated. See below.
+
+## Optional: ask AI for a fix
+
+crashlens works fully offline. If you want a second opinion, `--ai` sends the
+report (the same Markdown you can read, including any code snippets and log
+lines in it) to the Anthropic API and adds an explanation and suggested fix:
+
+```bash
+export ANTHROPIC_API_KEY=...
+crashlens error.log --source ~/code/shop --ai
+crashlens serve --ai          # adds an "Ask AI for a fix" button
+```
+
+Nothing is sent without `--ai`. In the web app, each report is sent only when
+you click the button and confirm. The default model is `claude-opus-5-5`
+(override with `CRASHLENS_AI_MODEL`); if it declines a request, the API's
+server-side fallback answers with another model. AI suggestions are never
+part of batch mode.
 
 ## Batch: a folder of crashes, ranked
 
@@ -200,6 +220,7 @@ crashlens --batch <dir> [binary]   [options]
 | --- | --- |
 | `--source DIR` | show the failing lines from your code and who last changed them |
 | `--log FILE` | attach your app log to a core dump report |
+| `--ai` | off by default: send the report to Claude for an explanation and fix |
 | `--json` | machine-readable output instead of Markdown |
 | `-o FILE` | write the report to a file |
 | `--no-gdb` | skip gdb (no backtrace or disassembly) |
@@ -235,7 +256,8 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [x] Python, Java and Node.js exceptions; ASan/LSan/UBSan reports
 - [x] Log context, source snippets and git blame
 - [x] Local web app (`crashlens serve`)
-- [ ] Optional AI explanation and fix suggestion (off by default)
+- [x] Optional AI explanation and fix suggestion (off by default)
+- [ ] Windows minidumps and macOS crash reports
 - [ ] Verify the binary matches the core by build ID
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
