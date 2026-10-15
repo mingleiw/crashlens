@@ -1,0 +1,10 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.lang.IllegalStateException: bad config value
+	at com.shop.Main.load(Main.java:7)
+	at com.shop.Main.main(Main.java:14)
+Caused by: java.lang.NumberFormatException: For input string: "abc"
+	at java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)
+	at java.base/java.lang.Integer.parseInt(Integer.java:662)
+	at java.base/java.lang.Integer.parseInt(Integer.java:778)
+	at com.shop.Main.parse(Main.java:6)
+	... 2 more

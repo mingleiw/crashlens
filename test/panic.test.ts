@@ -6,8 +6,8 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderBatchMarkdown, triageBatch } from "../src/batch.js";
 import { renderIssueMarkdown } from "../src/issue.js";
-import { parsePanic } from "../src/panic.js";
-import { toPanicIssue } from "../src/panicIssue.js";
+import { parseFailure as parsePanic } from "../src/failure.js";
+import { toFailureIssue as toPanicIssue } from "../src/failureIssue.js";
 
 /** Real panic output captured from Go 1.24 and Rust 1.97 programs. */
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "test", "fixtures", "panics");

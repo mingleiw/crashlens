@@ -4,9 +4,9 @@ import { isAbsolute, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { renderBatchMarkdown, triageBatch } from "./batch.js";
 import { coreDetails, toCoreIssue } from "./coreIssue.js";
-import { renderIssueMarkdown, toJson } from "./issue.js";
-import { parsePanic } from "./panic.js";
-import { toPanicIssue } from "./panicIssue.js";
+import { renderIssueMarkdown, toJson, withLog } from "./issue.js";
+import { parseFailure } from "./failure.js";
+import { logContext, toFailureIssue } from "./failureIssue.js";
 import { resolveReaCommand } from "./rea.js";
 import { triage } from "./triage.js";
 
@@ -22,6 +22,7 @@ Usage:
 Options:
   --json             Print JSON instead of Markdown
   -o, --output FILE  Write the report to FILE instead of stdout
+  --log FILE         Application log to show next to a core dump report (last lines)
   --no-gdb           Do not use gdb for core dumps (no backtrace or disassembly)
   --gdb PATH         gdb executable to use (default: gdb)
   -h, --help         Show this help
@@ -46,6 +47,7 @@ async function main(argv: readonly string[]): Promise<number> {
         json: { type: "boolean", default: false },
         output: { type: "string", short: "o" },
         batch: { type: "string" },
+        log: { type: "string" },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false },
@@ -77,14 +79,19 @@ async function main(argv: readonly string[]): Promise<number> {
   } else if (positionals.length === 2) {
     const [core, binary] = positionals as [string, string];
     const result = await triage({ corePath: absolute(core), binaryPath: absolute(binary), rea: resolveReaCommand(), gdb });
-    output = result.ok
-      ? {
-          ok: true,
-          text: values.json
-            ? `${toJson({ issue: toCoreIssue(result.value), details: coreDetails(result.value) })}\n`
-            : renderIssueMarkdown(toCoreIssue(result.value)),
-        }
-      : { ok: false, message: result.error.message };
+    if (result.ok) {
+      let issue = toCoreIssue(result.value);
+      if (values.log !== undefined) {
+        const log = readFileSync(values.log, "utf8");
+        issue = withLog(issue, logContext(log, log.length));
+      }
+      output = {
+        ok: true,
+        text: values.json
+          ? `${toJson({ issue, details: coreDetails(result.value) })}\n`
+          : renderIssueMarkdown(issue),
+      };
+    } else output = { ok: false, message: result.error.message };
   } else if (positionals.length === 1) {
     output = panicReport(positionals[0] as string, values.json);
   } else {
@@ -114,9 +121,9 @@ function panicReport(path: string, json: boolean): Output {
       message: `${path} is an ELF file. For a core dump, also pass the binary that crashed: crashlens ${path} <binary>`,
     };
   const text = bytes.toString("utf8");
-  const parsed = parsePanic(text);
+  const parsed = parseFailure(text);
   if (!parsed.ok) return { ok: false, message: parsed.error.message };
-  const issue = toPanicIssue(parsed.value, path === "-" ? "stdin" : path, text);
+  const issue = toFailureIssue(parsed.value, path === "-" ? "stdin" : path, text);
   return { ok: true, text: json ? `${toJson({ issue, details: parsed.value })}\n` : renderIssueMarkdown(issue) };
 }
 

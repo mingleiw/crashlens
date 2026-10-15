@@ -1,0 +1,3 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer (java.lang.String and java.lang.Integer are in module java.base of loader 'bootstrap')
+	at com.shop.Main.main(Main.java:13)

@@ -1,0 +1,23 @@
+2026-10-15T02:13:58Z info processing order 1234
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/no/such/config.json'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/srv/api/server.js:14:38)
+    at Module._compile (node:internal/modules/cjs/loader:1706:14)
+    at Object..js (node:internal/modules/cjs/loader:1839:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/no/such/config.json'
+}
+
+Node.js v22.22.0

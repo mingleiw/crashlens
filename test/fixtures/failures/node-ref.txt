@@ -1,0 +1,17 @@
+2026-10-15T02:13:58Z info processing order 1234
+/srv/api/server.js:10
+if (mode === "ref") console.log(missingVariable);
+                                ^
+
+ReferenceError: missingVariable is not defined
+    at Object.<anonymous> (/srv/api/server.js:10:33)
+    at Module._compile (node:internal/modules/cjs/loader:1706:14)
+    at Object..js (node:internal/modules/cjs/loader:1839:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.22.0

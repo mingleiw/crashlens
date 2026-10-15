@@ -1,0 +1,4 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "String.trim()" because the return value of "java.util.Map.get(Object)" is null
+	at com.shop.Main.name(Main.java:5)
+	at com.shop.Main.main(Main.java:11)

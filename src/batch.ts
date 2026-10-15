@@ -2,8 +2,8 @@ import { open, readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { toCoreIssue } from "./coreIssue.js";
 import { issueTitle, renderIssueMarkdown, type Issue } from "./issue.js";
-import { parsePanic } from "./panic.js";
-import { toPanicIssue } from "./panicIssue.js";
+import { parseFailure } from "./failure.js";
+import { toFailureIssue } from "./failureIssue.js";
 import type { ReaCommand } from "./rea.js";
 import { triage } from "./triage.js";
 
@@ -62,13 +62,13 @@ export async function triageBatch(options: BatchOptions): Promise<BatchResult> {
       else cores.push(candidate.path);
     } else {
       const text = await readFile(candidate.path, "utf8");
-      const parsed = parsePanic(text);
+      const parsed = parseFailure(text);
       if (parsed.ok)
         issues.push({
           file: name(candidate.path),
-          issue: toPanicIssue(parsed.value, name(candidate.path), text),
+          issue: toFailureIssue(parsed.value, name(candidate.path), text),
         });
-      else skipped.push({ file: name(candidate.path), reason: "no Go or Rust panic found" });
+      else skipped.push({ file: name(candidate.path), reason: "no crash, panic, exception or sanitizer report found" });
     }
   }
 
@@ -127,7 +127,7 @@ export function renderBatchMarkdown(result: BatchResult): string {
       ),
       "",
     );
-  else lines.push("No core dumps or panic logs were triaged.", "");
+  else lines.push("No core dumps or failure logs were triaged.", "");
   if (result.skipped.length > 0)
     lines.push(`Skipped ${result.skipped.length} file${result.skipped.length === 1 ? "" : "s"} (listed at the end).`, "");
 

@@ -1,0 +1,3 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.lang.ArithmeticException: / by zero
+	at com.shop.Main.main(Main.java:16)

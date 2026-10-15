@@ -1,0 +1,14 @@
+02:13:58 INFO processing order 1234
+
+=================================================================
+==469==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 12 byte(s) in 1 object(s) allocated from:
+    #0 0x7f5b22cf74e8 in strdup ../../../../src/libsanitizer/asan/asan_interceptors.cpp:578
+    #1 0x55a6681fd71d in leak /src/order/order.c:10
+    #2 0x55a6681fdcb0 in main /src/order/order.c:17
+    #3 0x7f5b2202a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #4 0x7f5b2202a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #5 0x55a6681fd2a4 in _start (/src/order/order+0x22a4) (BuildId: 28b069bbe8944ed46028087b48f1025442da8a78)
+
+SUMMARY: AddressSanitizer: 12 byte(s) leaked in 1 allocation(s).

@@ -1,50 +1,4 @@
-import { err, ok, type Result } from "./result.js";
-
-export type PanicLanguage = "go" | "rust";
-
-export interface PanicFrame {
-  readonly function: string;
-  readonly file: string | null;
-  readonly line: number | null;
-  readonly column: number | null;
-  /** Heuristic: frame belongs to the program rather than the runtime/stdlib. */
-  readonly own: boolean;
-  /** Go "created by" pseudo-frame: where the goroutine was started. */
-  readonly createdBy: boolean;
-}
-
-export interface ParsedPanic {
-  readonly language: PanicLanguage;
-  /** "panic" or "fatal error" for Go; "panic" for Rust. */
-  readonly header: string;
-  readonly message: string;
-  /** Go goroutine id and state, or Rust thread name. */
-  readonly context: string | null;
-  /** Rust's "panicked at" location; Go has none beyond frames. */
-  readonly location: {
-    readonly file: string;
-    readonly line: number;
-    readonly column: number | null;
-  } | null;
-  /** Go's "[signal SIGSEGV: ... addr=0x0 pc=...]" line, if present. */
-  readonly signal: string | null;
-  readonly frames: readonly PanicFrame[];
-  /** Number of other goroutines printed after the failing one (Go). */
-  readonly otherGoroutines: number;
-}
-
-/** Parse Go or Rust panic output. Leading/trailing noise is ignored. */
-export function parsePanic(text: string): Result<ParsedPanic> {
-  const normalized = text.replaceAll("\r\n", "\n");
-  return (
-    parseGo(normalized) ??
-    parseRust(normalized) ??
-    err(
-      "unsupported_crash",
-      "No Go or Rust panic found. Expected a line starting with `panic:`, `fatal error:` or `thread '…' panicked at`.",
-    )
-  );
-}
+import { failure, frame, type FailureFrame, type ParsedFailure } from "../failure.js";
 
 // ---------------------------------------------------------------- Go
 
@@ -52,7 +6,7 @@ const GO_HEADER = /^(panic|fatal error): (.*)$/m;
 const GO_GOROUTINE = /^goroutine (\d+) \[([^\]]+)\]:$/;
 const GO_FILE_LINE = /^\t(.+?):(\d+)(?: \+0x[0-9a-f]+)?$/;
 
-function parseGo(text: string): Result<ParsedPanic> | null {
+export function parseGo(text: string): ParsedFailure | null {
   const header = GO_HEADER.exec(text);
   if (header === null) return null;
   const lines = text.slice(header.index).split("\n");
@@ -60,7 +14,7 @@ function parseGo(text: string): Result<ParsedPanic> | null {
     lines.slice(1, 4).find((line) => line.startsWith("[signal ")) ?? null;
 
   const start = lines.findIndex((line) => GO_GOROUTINE.test(line));
-  const frames: PanicFrame[] = [];
+  const frames: FailureFrame[] = [];
   let context: string | null = null;
   let otherGoroutines = 0;
   if (start !== -1) {
@@ -79,29 +33,30 @@ function parseGo(text: string): Result<ParsedPanic> | null {
         ? name.replace(/^created by (\S+).*$/, "$1")
         : name.replace(/\([^()]*\)$/, "");
       const file = location?.[1] ?? null;
-      frames.push({
-        function: fn,
-        file,
-        line: location ? Number(location[2]) : null,
-        column: null,
-        own: isOwnGoFrame(fn, file),
-        createdBy,
-      });
+      frames.push(
+        frame({
+          function: fn,
+          file,
+          line: location ? Number(location[2]) : null,
+          own: isOwnGoFrame(fn, file),
+          createdBy,
+        }),
+      );
       index += location ? 2 : 1;
     }
     otherGoroutines = lines
       .slice(index)
       .filter((line) => GO_GOROUTINE.test(line)).length;
   }
-  return ok({
+  return failure({
     language: "go",
     header: header[1] ?? "panic",
     message: (header[2] ?? "").replace(/ \[recovered\]$/, ""),
     context,
-    location: null,
     signal,
     frames,
     otherGoroutines,
+    start: header.index,
   });
 }
 
@@ -130,7 +85,7 @@ const RUST_LEGACY_HEADER =
 const RUST_FRAME = /^\s*\d+:\s+(?:0x[0-9a-f]+ - )?(.+)$/;
 const RUST_AT = /^\s+at (.+?):(\d+)(?::(\d+))?$/;
 
-function parseRust(text: string): Result<ParsedPanic> | null {
+export function parseRust(text: string): ParsedFailure | null {
   const modern = RUST_HEADER.exec(text);
   const legacy = modern === null ? RUST_LEGACY_HEADER.exec(text) : null;
   if (modern === null && legacy === null) return null;
@@ -159,38 +114,38 @@ function parseRust(text: string): Result<ParsedPanic> | null {
     rest = text.slice(match.index + match[0].length);
   }
 
-  const frames: PanicFrame[] = [];
+  const frames: FailureFrame[] = [];
   const traceStart = rest.indexOf("stack backtrace:");
   if (traceStart !== -1) {
     const lines = rest.slice(traceStart).split("\n").slice(1);
     for (let index = 0; index < lines.length; index++) {
-      const frame = RUST_FRAME.exec(lines[index] ?? "");
-      if (frame === null) {
+      const symbol = RUST_FRAME.exec(lines[index] ?? "");
+      if (symbol === null) {
         if (!RUST_AT.test(lines[index] ?? "")) break;
         continue;
       }
       const at = RUST_AT.exec(lines[index + 1] ?? "");
-      const fn = normalizeRustSymbol(frame[1] ?? "");
+      const fn = normalizeRustSymbol(symbol[1] ?? "");
       const frameFile = at?.[1] ?? null;
-      frames.push({
-        function: fn,
-        file: frameFile,
-        line: at ? Number(at[2]) : null,
-        column: at?.[3] === undefined ? null : Number(at[3]),
-        own: isOwnRustFrame(fn, frameFile),
-        createdBy: false,
-      });
+      frames.push(
+        frame({
+          function: fn,
+          file: frameFile,
+          line: at ? Number(at[2]) : null,
+          column: at?.[3] === undefined ? null : Number(at[3]),
+          own: isOwnRustFrame(fn, frameFile),
+        }),
+      );
     }
   }
-  return ok({
+  return failure({
     language: "rust",
     header: "panic",
     message,
     context: `thread '${thread}'`,
     location: { file, line, column },
-    signal: null,
     frames,
-    otherGoroutines: 0,
+    start: (modern ?? legacy)?.index ?? 0,
   });
 }
 

@@ -1,0 +1,18 @@
+2026-10-15T02:13:58Z info processing order 1234
+/srv/api/server.js:2
+function total(order) { return order.items.reduce((a, b) => a + b, 0); }
+                                     ^
+
+TypeError: Cannot read properties of undefined (reading 'items')
+    at total (/srv/api/server.js:2:38)
+    at handle (/srv/api/server.js:3:30)
+    at Object.<anonymous> (/srv/api/server.js:8:23)
+    at Module._compile (node:internal/modules/cjs/loader:1706:14)
+    at Object..js (node:internal/modules/cjs/loader:1839:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+
+Node.js v22.22.0

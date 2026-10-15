@@ -1,0 +1,18 @@
+2026-10-15T02:13:58Z info processing order 1234
+/srv/api/server.js:4
+function recurse(n) { return recurse(n + 1); }
+                      ^
+
+RangeError: Maximum call stack size exceeded
+    at recurse (/srv/api/server.js:4:23)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+    at recurse (/srv/api/server.js:4:30)
+
+Node.js v22.22.0

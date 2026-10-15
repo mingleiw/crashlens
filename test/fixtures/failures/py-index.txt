@@ -1,0 +1,10 @@
+2026-10-15 05:22:44,065 INFO worker started
+2026-10-15 05:22:44,065 INFO processing order 1234 for user 88
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 40, in <module>
+    main(sys.argv[1])
+    ~~~~^^^^^^^^^^^^^
+  File "/srv/shop/shop.py", line 25, in main
+    print([1, 2, 3][7])
+          ~~~~~~~~~^^^
+IndexError: list index out of range

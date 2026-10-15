@@ -72,6 +72,12 @@ export function toCoreIssue(report: TriageReport): Issue {
         : [{ label: "Source", value: `\`${where.source}\`` }]),
     ],
     sections,
+    locations: report.frames.flatMap((frame) => {
+      const match = frame.source === null ? null : /^(.+):(\d+)$/.exec(frame.source);
+      if (match === null) return [];
+      const own = frame.location.kind === "binary-function" || frame.location.kind === "binary";
+      return [{ file: match[1] as string, line: Number(match[2]), function: frameName(frame), own }];
+    }).sort((a, b) => Number(b.own) - Number(a.own)),
     cause: classification.explanation,
     nextSteps: classification.nextSteps,
     confidence: classification.confidence,

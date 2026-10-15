@@ -1,0 +1,5 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.util.ConcurrentModificationException
+	at java.base/java.util.ArrayList$Itr.checkForComodification(ArrayList.java:1095)
+	at java.base/java.util.ArrayList$Itr.next(ArrayList.java:1049)
+	at com.shop.Main.main(Main.java:15)

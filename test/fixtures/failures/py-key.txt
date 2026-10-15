@@ -1,0 +1,10 @@
+2026-10-15 05:22:44,001 INFO worker started
+2026-10-15 05:22:44,001 INFO processing order 1234 for user 88
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 40, in <module>
+    main(sys.argv[1])
+    ~~~~^^^^^^^^^^^^^
+  File "/srv/shop/shop.py", line 23, in main
+    print({"a": 1}["sku"])
+          ~~~~~~~~^^^^^^^
+KeyError: 'sku'

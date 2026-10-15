@@ -5,7 +5,14 @@
  */
 export interface Issue {
   /** Where the failure came from. */
-  readonly source: "core" | "go-panic" | "rust-panic";
+  readonly source:
+    | "core"
+    | "go-panic"
+    | "rust-panic"
+    | "python-exception"
+    | "java-exception"
+    | "node-exception"
+    | "sanitizer";
   /** Stable crash class, e.g. "null-pointer-dereference" or "go-nil-map-write". */
   readonly kind: string;
   /** Short crash class title, e.g. "NULL pointer dereference". */
@@ -17,6 +24,8 @@ export interface Issue {
   /** Label/value rows for the details table; values are Markdown. */
   readonly facts: readonly IssueFact[];
   readonly sections: readonly IssueSection[];
+  /** Source locations from the stack, the program's own frames first. */
+  readonly locations: readonly IssueLocation[];
   readonly cause: string;
   readonly nextSteps: readonly string[];
   readonly confidence: "high" | "medium" | "low";
@@ -28,6 +37,13 @@ export interface Issue {
   readonly signature: string;
   /** Italic closing line. */
   readonly footer: string;
+}
+
+export interface IssueLocation {
+  readonly file: string;
+  readonly line: number;
+  readonly function: string;
+  readonly own: boolean;
 }
 
 export interface IssueFact {
@@ -49,8 +65,16 @@ export type IssueSection =
     };
 
 /** Full issue title, e.g. "Crash: NULL pointer dereference in `sum+0x31`". */
+function issuePrefix(issue: Issue): "Crash" | "Panic" | "Exception" {
+  return issue.source === "core" || issue.source === "sanitizer"
+    ? "Crash"
+    : issue.source.endsWith("-panic")
+      ? "Panic"
+      : "Exception";
+}
+
 export function issueTitle(issue: Issue): string {
-  const prefix = issue.source === "core" ? "Crash" : "Panic";
+  const prefix = issuePrefix(issue);
   return issue.where === null
     ? `${prefix}: ${issue.title}`
     : `${prefix}: ${issue.title} in \`${issue.where}\``;
@@ -69,7 +93,7 @@ export function renderIssueMarkdown(issue: Issue, depth = 0): string {
     "",
     issue.summary,
     "",
-    `${h(2)} ${issue.source === "core" ? "Crash" : "Panic"} details`,
+    `${h(2)} ${issuePrefix(issue)} details`,
     "",
     "| Field | Value |",
     "| --- | --- |",
@@ -114,6 +138,21 @@ export function renderIssueMarkdown(issue: Issue, depth = 0): string {
     "",
   );
   return lines.join("\n");
+}
+
+/**
+ * Attach the tail of an application log, for inputs that carry no log
+ * themselves (core dumps). Lines are the last ones before end of file.
+ */
+export function withLog(issue: Issue, lines: readonly string[]): Issue {
+  if (lines.length === 0) return issue;
+  return {
+    ...issue,
+    sections: [
+      ...issue.sections,
+      { heading: "Last log lines", kind: "code", language: "", lines },
+    ],
+  };
 }
 
 /** Table cells cannot contain raw pipes or newlines. */

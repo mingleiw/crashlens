@@ -1,0 +1,17 @@
+2026-10-15 05:22:44,344 INFO worker started
+2026-10-15 05:22:44,344 INFO processing order 1234 for user 88
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 34, in main
+    int("abc")
+    ~~~^^^^^^^
+ValueError: invalid literal for int() with base 10: 'abc'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 40, in <module>
+    main(sys.argv[1])
+    ~~~~^^^^^^^^^^^^^
+  File "/srv/shop/shop.py", line 36, in main
+    raise RuntimeError("could not parse quantity") from e
+RuntimeError: could not parse quantity

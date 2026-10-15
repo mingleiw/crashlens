@@ -1,0 +1,19 @@
+2026-10-15 05:22:44,165 INFO worker started
+2026-10-15 05:22:44,165 INFO processing order 1234 for user 88
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 40, in <module>
+    main(sys.argv[1])
+    ~~~~^^^^^^^^^^^^^
+  File "/srv/shop/shop.py", line 29, in main
+    json.loads("{not json")
+    ~~~~~~~~~~^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 361, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)

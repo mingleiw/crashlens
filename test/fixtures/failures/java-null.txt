@@ -1,0 +1,4 @@
+2026-10-15 02:13:58 INFO processing order 1234
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "java.util.List.iterator()" because "<parameter1>" is null
+	at com.shop.Main.total(Main.java:4)
+	at com.shop.Main.main(Main.java:18)

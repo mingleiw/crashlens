@@ -1,0 +1,10 @@
+2026-10-15 05:22:44,390 INFO worker started
+2026-10-15 05:22:44,390 INFO processing order 1234 for user 88
+Traceback (most recent call last):
+  File "/srv/shop/shop.py", line 40, in <module>
+    main(sys.argv[1])
+    ~~~~^^^^^^^^^^^^^
+  File "/srv/shop/shop.py", line 38, in main
+    open("/no/such/config.yaml")
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/no/such/config.yaml'

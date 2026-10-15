@@ -1,0 +1,29 @@
+02:13:58 INFO processing order 1234
+=================================================================
+==468==ERROR: AddressSanitizer: attempting double-free on 0x502000000010 in thread T0:
+    #0 0x7fe1388fc4d8 in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:52
+    #1 0x5562e994149f in release /src/order/order.c:7
+    #2 0x5562e9941c0d in main /src/order/order.c:16
+    #3 0x7fe137c2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #4 0x7fe137c2a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #5 0x5562e99412a4 in _start (/src/order/order+0x22a4) (BuildId: 28b069bbe8944ed46028087b48f1025442da8a78)
+
+0x502000000010 is located 0 bytes inside of 8-byte region [0x502000000010,0x502000000018)
+freed by thread T0 here:
+    #0 0x7fe1388fc4d8 in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:52
+    #1 0x5562e994149f in release /src/order/order.c:7
+    #2 0x5562e9941c01 in main /src/order/order.c:16
+    #3 0x7fe137c2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #4 0x7fe137c2a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #5 0x5562e99412a4 in _start (/src/order/order+0x22a4) (BuildId: 28b069bbe8944ed46028087b48f1025442da8a78)
+
+previously allocated by thread T0 here:
+    #0 0x7fe1388fd9c7 in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69
+    #1 0x5562e994137e in new_item /src/order/order.c:6
+    #2 0x5562e9941bf1 in main /src/order/order.c:16
+    #3 0x7fe137c2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #4 0x7fe137c2a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #5 0x5562e99412a4 in _start (/src/order/order+0x22a4) (BuildId: 28b069bbe8944ed46028087b48f1025442da8a78)
+
+SUMMARY: AddressSanitizer: double-free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:52 in free
+==468==ABORTING
