@@ -29,10 +29,10 @@ Include the crashlens version (`git rev-parse --short HEAD`), your distro,
 
 Good first areas:
 
-- new crash classes in `src/classify.ts` or panic rules in `src/panicIssue.ts`
-  (with a test; for panics, add real captured output to `test/fixtures/panics/`)
+- new crash classes in `src/classify.ts` or rules in `src/rules.ts`
+  (with a test and real captured output in `test/fixtures/`)
 - clearer explanations or next steps in reports
-- new inputs from the [roadmap](README.md#roadmap), e.g. Python or Node tracebacks
+- new inputs from the [roadmap](README.md#roadmap), e.g. .NET, Ruby or PHP errors
 - docs: getting core dumps on different distros and containers
 
 For larger changes, open an issue first so we can agree on the approach.
@@ -64,30 +64,40 @@ skipped with a message saying what's missing.
 
 ```
 src/
-  cli.ts          modes (core, panic text, --batch), output, exit codes
-  issue.ts        the shared Issue model + Markdown/JSON rendering
-  batch.ts        find crashes in a folder, triage, group by signature
+  cli.ts            modes (serve, core, text, --batch), flags, output, exit codes
+  issue.ts          the shared Issue model + Markdown/JSON rendering
+  batch.ts          find crashes in a folder, triage, group by signature
+  fileKind.ts       content-based detection: core dump, executable, text
+  source.ts         --source: map frames to repo files, snippets, git blame
+  server.ts         crashlens serve: localhost HTTP API, token + Host checks
+  web/page.ts       the browser UI (HTML/CSS/JS, no external resources)
 
   # core dumps
-  triage.ts       combines REA, symbols and gdb into one core report
-  coreIssue.ts    core report → Issue
-  rea.ts          runs the REA CLI and parses the facts we use
-  ntFile.ts       parses the core's list of mapped files (NT_FILE)
-  symbolize.ts    load bias + symbols: runtime address → function+offset
-  gdb.ts          optional gdb backtrace and disassembly (core file only)
-  classify.ts     signal → crash type, explanation, next steps, confidence
+  triage.ts         combines REA, symbols and gdb into one core report
+  coreIssue.ts      core report → Issue
+  rea.ts            runs the REA CLI and parses the facts we use
+  ntFile.ts         parses the core's list of mapped files (NT_FILE)
+  symbolize.ts      load bias + symbols: runtime address → function+offset
+  gdb.ts            optional gdb backtrace and disassembly (core file only)
+  classify.ts       signal → crash type, explanation, next steps, confidence
 
-  # panics
-  panic.ts        parses Go and Rust panic output into frames
-  panicIssue.ts   panic rules (message → diagnosis) and panic → Issue
+  # text failures
+  failure.ts        ParsedFailure model + format detection
+  parsers/          goRust.ts, python.ts, java.ts, node.ts, sanitizer.ts
+  rules.ts          message → diagnosis rules for every language
+  failureIssue.ts   ParsedFailure → Issue (stack, extra stacks, log context)
 test/
-  unit.test.ts    core-dump logic, using fixtures shaped like real REA/gdb output
-  panic.test.ts   panics and batch, using real Go 1.24 / Rust 1.97 output
-  fixtures/       captured panic output (paths anonymized)
-  e2e.test.ts     compiles, crashes and triages real C and Go programs
+  unit.test.ts      core-dump logic, using fixtures shaped like real REA/gdb output
+  panic.test.ts     Go/Rust panics and batch grouping
+  failure.test.ts   Python, Java, Node and sanitizer output, log context
+  source.test.ts    snippets, blame, and the source-folder boundary
+  server.test.ts    web API access control and uploads
+  fixtures/         real captured output (paths anonymized)
+  e2e.test.ts       compiles, crashes and triages real C and Go programs
 
-To add a new input type (say, Python tracebacks), parse it into frames and
-build an `Issue`. Rendering, JSON and batch grouping then work unchanged.
+To add a new input type (say, .NET exceptions), add a parser under
+`src/parsers/` that returns a `ParsedFailure`, add rules to `src/rules.ts`, and
+capture real output as fixtures. Rendering, JSON and batch grouping then work unchanged.
 ```
 
 ## Principles

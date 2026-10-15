@@ -6,9 +6,10 @@
 **Logs tell you where your program was. crashlens tells you why it died.**
 
 When a program crashes, the logs usually just stop. crashlens reads what the
-crash left behind (a core dump, or a Go/Rust panic message) and writes a bug
-report you can paste into an issue. It never runs your program and needs no SDK.
-Point it at a folder of crashes and it groups them into distinct bugs.
+crash left behind (a core dump, a panic, an exception, a sanitizer report) and
+writes a bug report you can paste into an issue: where it died, why, the log
+lines right before it, and, if you point it at your repo, the failing code and
+who last changed it. It never runs your program and needs no SDK.
 
 ![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
 
@@ -22,16 +23,33 @@ crashlens ./core ./parser > crash.md
 <img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
 </details>
 
-> **Status:** early prototype. Reads Linux x86-64 core dumps (C, C++, Rust, Go)
-> and Go/Rust panic output. Got a crash that stumped you? Open an issue. Real
+> **Status:** early prototype. Reads Linux x86-64 core dumps, Go/Rust panics,
+> Python tracebacks, Java and Node.js stack traces, and ASan/LSan/UBSan reports. Got a crash that stumped you? Open an issue. Real
 > crashes are the best test cases.
 
-## Three ways to use it
+## Use it in your browser
 
 ```bash
-crashlens ./core ./app                 # a native crash: core dump + the binary
-go run . 2>&1 | crashlens -            # a Go or Rust panic, piped in (or saved to a file)
-crashlens --batch ./crashes ./app      # a folder of crashes, grouped into distinct bugs
+crashlens serve
+```
+
+Open the URL it prints, then drag in logs, sanitizer reports, or a core dump
+with its binary, or paste a stack trace. Every bug gets a report you can copy
+as Markdown, and the same bug from many files is grouped with a count.
+
+![crashlens in the browser: a Python "Value was None" bug seen 3 times, with the stack trace, the failing code and a list of other bugs](docs/images/app.png)
+
+The app runs on `127.0.0.1` only, needs the private token in the URL it
+prints, loads nothing from the internet, and deletes uploaded files when it
+stops.
+
+## Or from the command line
+
+```bash
+crashlens ./core ./app                     # a native crash: core dump + the binary
+python app.py 2>&1 | crashlens -           # any supported failure, piped in
+crashlens error.log --source ~/code/shop   # ...and show the failing code + git blame
+crashlens --batch ./crashes ./app          # a folder of crashes, grouped into bugs
 ```
 
 ## What it recognizes
@@ -49,6 +67,22 @@ crashlens --batch ./crashes ./app      # a folder of crashes, grouped into disti
 map, divide by zero, failed type assertion, concurrent map access, deadlock,
 closed-channel misuse, stack overflow, explicit `panic(...)`
 
+**Python**: `None` used as a value, missing dict key, index errors, bad JSON,
+missing files, network errors, import errors, recursion, and chained exceptions
+(reports the root cause of `raise ... from e`)
+
+**Java**: NullPointerException (with the JVM's "because ... is null" detail),
+index out of bounds, bad casts, NumberFormatException,
+ConcurrentModificationException, stack overflow, out of memory, and the
+deepest `Caused by:` in a chain
+
+**Node.js**: `Cannot read properties of undefined`, "is not a function",
+undefined variables, bad JSON, `ENOENT`/`ECONNREFUSED`, stack overflow
+
+**Sanitizers** (ASan, LSan, UBSan): use after free (with the "freed by" and
+"allocated by" stacks), buffer overflows, double free, memory leaks, NULL
+dereference, integer overflow and other undefined behavior
+
 **Rust panics**: `unwrap()` on `None`/`Err` (with the error value), index and
 slice out of bounds, arithmetic overflow, divide by zero, `RefCell` borrowed
 twice, failed `assert!`, string sliced inside a character, explicit `panic!`/`expect`
@@ -60,6 +94,21 @@ skips runtime and standard-library frames.
 Every report has a **signature** built from the crash type and top frame names
 (never addresses or directories), so the same bug groups together across runs
 and machines.
+
+## What's in a report
+
+- **Where it died**: the first frame in *your* code, with the stack trace
+  (your frames marked) and, for core dumps, the faulting instruction and the
+  register that was NULL.
+- **Why**: the crash type in plain language and what to check next.
+- **What it was doing**: the log lines printed just before the failure (or
+  your app log via `--log app.log` for core dumps), so you can see which
+  request, order or user triggered it.
+- **Your code**: with `--source DIR`, the failing lines from your repo and the
+  last commit that touched them. Production paths like
+  `/srv/releases/42/app/orders.py` are matched to `app/orders.py`; Java files
+  are found by package. Only files inside that folder are read.
+- **Evidence**: hashes of every input and how each fact was obtained.
 
 ## Batch: a folder of crashes, ranked
 
@@ -141,19 +190,22 @@ On systemd distros cores often go to systemd-coredump instead:
 ## Usage
 
 ```
+crashlens serve [--port 7777]      [--source DIR]
 crashlens <core> <binary>          [options]
-crashlens <panic.txt | ->          [options]
+crashlens <error.log | ->          [options]
 crashlens --batch <dir> [binary]   [options]
 ```
 
 | Option | Meaning |
 | --- | --- |
+| `--source DIR` | show the failing lines from your code and who last changed them |
+| `--log FILE` | attach your app log to a core dump report |
 | `--json` | machine-readable output instead of Markdown |
 | `-o FILE` | write the report to a file |
 | `--no-gdb` | skip gdb (no backtrace or disassembly) |
 | `--gdb PATH` | use a specific gdb |
 
-Panic text needs nothing else installed. For core dumps: `CRASHLENS_REA` points at a specific REA (a `rea` executable or a
+Text inputs (panics, exceptions, sanitizer reports) need nothing else installed. For core dumps: `CRASHLENS_REA` points at a specific REA (a `rea` executable or a
 `scripts/rea.mjs` checkout). `REA_PWNTOOLS_PYTHON` is required by REA.
 
 Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
@@ -168,13 +220,22 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - Panics are read from text only. "Your code" is decided by package and crate
   names, and Rust needs `RUST_BACKTRACE=1` for a stack trace.
 - Crash types are heuristics and say how confident they are.
-- Reports include local paths and register values. Review before posting publicly.
+- `--source` reads only regular files inside the folder you give it (symlinks
+  and `../` paths that leave it are rejected) and runs `git blame` there.
+- `crashlens serve` listens on 127.0.0.1 only, requires the session token from
+  the printed URL, rejects other `Host`/`Origin` headers, sets a strict Content
+  Security Policy, and keeps uploads in a private temp folder deleted on exit.
+- Reports include local paths, log lines and register values. Review before
+  posting publicly.
 
 ## Roadmap
 
 - [x] Group a folder of crashes by signature (`--batch`)
 - [x] Go and Rust panic text
-- [ ] JS/Node, Python and Java exceptions
+- [x] Python, Java and Node.js exceptions; ASan/LSan/UBSan reports
+- [x] Log context, source snippets and git blame
+- [x] Local web app (`crashlens serve`)
+- [ ] Optional AI explanation and fix suggestion (off by default)
 - [ ] Verify the binary matches the core by build ID
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
