@@ -13,6 +13,8 @@ export interface BatchOptions {
   readonly binaryPath: string | null;
   readonly rea: ReaCommand;
   readonly gdb: string | null;
+  /** Optional step applied to each group's representative issue (e.g. source snippets). */
+  readonly enrich?: (issue: Issue) => Promise<Issue>;
   /** Core triage runs REA and gdb, so keep this small. */
   readonly concurrency?: number;
 }
@@ -83,10 +85,12 @@ export async function triageBatch(options: BatchOptions): Promise<BatchResult> {
     else skipped.push({ file: name(core), reason: result.error.message });
   });
 
+  const groups = group(issues);
+  const enrich = options.enrich;
   return {
     directory: options.directory,
     failures: issues.length,
-    groups: group(issues),
+    groups: enrich === undefined ? groups : await Promise.all(groups.map(async (g) => ({ ...g, issue: await enrich(g.issue) }))),
     skipped: skipped.sort((a, b) => a.file.localeCompare(b.file)),
   };
 }
