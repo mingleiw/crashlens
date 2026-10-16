@@ -4,8 +4,11 @@
 //   node site/make-demo-data.mjs --source DIR [--core CORE --binary BIN]
 //
 // --source points at a git checkout containing the sample shop.py so the
-// Python reports include code and blame; --core/--binary add a native crash
-// (needs REA and REA_PWNTOOLS_PYTHON, like the CLI).
+// Python reports include code and blame; --core/--binary add the native crash
+// behind the demo's "Try a sample core dump" button (needs REA and
+// REA_PWNTOOLS_PYTHON, like the CLI). Only the report is published, never the
+// core: build site/sample/parser.c and capture the core with an empty
+// environment (`env -i ./parser config.ini`) so the report shows nothing local.
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -35,10 +38,11 @@ const SAMPLES = [
 
 const issues = [];
 let id = 0;
-const add = (name, issue) => {
+const entry = (name, issue) => {
   id += 1;
-  issues.push({ id: `sample-${id}`, name, at: "2026-10-15T02:14:00.000Z", issue, markdown: renderIssueMarkdown(issue) });
+  return { id: `sample-${id}`, name, at: "2026-10-15T02:14:00.000Z", issue, markdown: renderIssueMarkdown(issue) };
 };
+const add = (name, issue) => issues.push(entry(name, issue));
 
 for (const [name, path] of SAMPLES) {
   const text = fixture(path);
@@ -49,14 +53,15 @@ for (const [name, path] of SAMPLES) {
   add(name, scrub(issue, values.source ? [[values.source, "~/code/shop"]] : []));
 }
 
+let sample;
 if (values.core && values.binary) {
   const result = await triage({ corePath: values.core, binaryPath: values.binary, rea: resolveReaCommand(), gdb: "gdb" });
   if (!result.ok) throw new Error(result.error.message);
   const shown = [[values.core, "parser.core"], [values.binary, basename(values.binary)]];
-  add("parser.core", scrub(toCoreIssue(result.value), shown));
+  sample = entry("parser.core", scrub(toCoreIssue(result.value), shown));
 }
 
-writeFileSync(join(root, "site", "demo-data.json"), `${JSON.stringify({ issues }, (_k, v) => (typeof v === "bigint" ? `0x${v.toString(16)}` : v), 1)}\n`);
+writeFileSync(join(root, "site", "demo-data.json"), `${JSON.stringify({ issues, sample }, (_k, v) => (typeof v === "bigint" ? `0x${v.toString(16)}` : v), 1)}\n`);
 console.log(`wrote ${issues.length} sample reports`);
 
 /** Replace local paths with the names a visitor should see. */

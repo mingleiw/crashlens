@@ -32,7 +32,8 @@ crashlens ./core ./parser > crash.md
 ## Use it in your browser
 
 The [live demo](https://mingleiw.github.io/crashlens/) runs the same interface
-with sample bugs. Pasted text is analyzed in your browser and never uploaded.
+with sample bugs, plus a **Try a sample core dump** button that walks through a
+real native crash. Pasted text is analyzed in your browser and never uploaded.
 To analyze core dumps, read your source code or watch live logs, run it
 locally:
 

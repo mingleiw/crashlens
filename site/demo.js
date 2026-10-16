@@ -8,7 +8,25 @@
 
   var preloaded = [];
   var session = [];
-  var ready = fetch("demo-data.json").then(function (r) { return r.json(); }).then(function (data) { preloaded = data.issues; });
+  var sample = null;
+  var ready = fetch("demo-data.json").then(function (r) { return r.json(); }).then(function (data) { preloaded = data.issues; sample = data.sample; });
+
+  // "Try a sample core dump" drops two stand-in files through the real upload
+  // flow. They carry only this marker; the report was made from the real core
+  // ahead of time (site/make-demo-data.mjs), and the dump is never published.
+  var MARKER = "crashlens demo sample: ";
+  document.addEventListener("DOMContentLoaded", function () {
+    var button = document.getElementById("sampleCore");
+    var input = document.getElementById("files");
+    if (!button || !input) return;
+    button.addEventListener("click", function () {
+      var picked = new DataTransfer();
+      picked.items.add(new File([MARKER + "core"], "parser.core"));
+      picked.items.add(new File([MARKER + "binary"], "parser"));
+      input.files = picked.files;
+      input.dispatchEvent(new Event("change"));
+    });
+  });
   var counter = 0;
 
   function json(status, body) {
@@ -45,8 +63,13 @@
         case "PUT /api/upload": {
           var file = init.body;
           var name = url.searchParams.get("name") || "upload";
-          return file.slice(0, 4).arrayBuffer().then(function (head) {
+          return file.slice(0, 64).arrayBuffer().then(function (head) {
             var b = new Uint8Array(head);
+            var text = new TextDecoder().decode(b);
+            if (sample && (text === MARKER + "core" || text === MARKER + "binary")) {
+              var kind = text.slice(MARKER.length);
+              return json(200, { upload: { id: "sample-" + kind, name: name, size: file.size, kind: kind } });
+            }
             if (b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46)
               return json(422, { error: "this is a core dump or binary. Core dumps are analyzed by REA on your own machine." + LOCAL_ONLY });
             if (file.size > 8 * 1024 * 1024) return json(413, { error: "larger than 8 MiB." });
@@ -60,7 +83,16 @@
         }
         case "POST /api/source":
           return json(400, { error: "Reading your source code needs files on disk." + LOCAL_ONLY });
-        case "POST /api/core":
+        case "POST /api/core": {
+          var picked = JSON.parse(init.body);
+          if (!sample || picked.core !== "sample-core" || picked.binary !== "sample-binary")
+            return json(400, { error: "Core dumps are analyzed by REA on your own machine." + LOCAL_ONLY });
+          var withLog = window.crashlens.attachLog(sample.issue, picked.log || "");
+          var e = entry(sample.name, withLog);
+          session.push(e);
+          // The local app takes a moment here too: REA and gdb read the core.
+          return new Promise(function (resolve) { setTimeout(function () { resolve(json(200, e)); }, 700); });
+        }
         case "POST /api/ai":
           return json(400, { error: "Not available in the demo." + LOCAL_ONLY });
         case "POST /api/clear":

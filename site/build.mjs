@@ -42,6 +42,9 @@ const html = INDEX_HTML
 <link rel="icon" href="data:,">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">`)
   .replace('<main class="layout">', `${banner}\n<main class="layout">`)
+  .replace('multiple hidden></label>', `multiple hidden></label>
+      <div class="sample"><button type="button" id="sampleCore" class="btn secondary">Try a sample core dump</button>
+      <div class="hint">A real crash of a <a href="sample/parser.c">small C program</a>. The report was made from its core dump by crashlens and REA ahead of time; the dump itself stays offline.</div></div>`)
   .replace('<div class="local" title="Files are processed by the crashlens process on this computer">Runs locally · nothing leaves this machine</div>', `<a class="local" href="${REPO}">Runs in your browser · open source on GitHub</a>`);
 
 const demoCss = `
@@ -51,6 +54,9 @@ const demoCss = `
 @media (min-width: 1548px) { .demo-bar { margin-left: auto; margin-right: auto; } }
 a.local { text-decoration: none; }
 #sourceCard { display: none; }
+.sample { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.sample .hint { margin-top: 6px; }
+.sample a { color: var(--accent); }
 `;
 
 writeFileSync(join(out, "index.html"), html);
@@ -58,5 +64,7 @@ writeFileSync(join(out, "app.css"), APP_CSS + demoCss);
 writeFileSync(join(out, "app.js"), APP_JS);
 copyFileSync(join(site, "demo.js"), join(out, "demo.js"));
 copyFileSync(join(site, "demo-data.json"), join(out, "demo-data.json"));
+mkdirSync(join(out, "sample"));
+copyFileSync(join(site, "sample", "parser.c"), join(out, "sample", "parser.c"));
 writeFileSync(join(out, ".nojekyll"), "");
 console.log("built site/dist");

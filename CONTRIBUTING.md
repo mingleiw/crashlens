@@ -93,6 +93,8 @@ site/
   build.mjs         builds site/dist (npm run build:site); check.mjs compares
                     the browser bundle with Node on every fixture
   make-demo-data.mjs  regenerates the demo's preloaded sample reports
+  sample/parser.c   the C program behind "Try a sample core dump" (only its
+                    report is published, never the core)
 test/
   unit.test.ts      core-dump logic, using fixtures shaped like real REA/gdb output
   panic.test.ts     Go/Rust panics and batch grouping
