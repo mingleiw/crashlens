@@ -60,6 +60,34 @@ crashlens error.log --source ~/code/shop   # ...and show the failing code + git 
 crashlens --batch ./crashes ./app          # a folder of crashes, grouped into bugs
 ```
 
+## Use it from coding agents
+
+crashlens ships as a Claude Code plugin: a skill that teaches the agent when
+to use it and how to fix the root cause, plus an MCP server with three
+read-only tools (`analyze_failure`, `analyze_core_dump`, `analyze_crash_folder`).
+
+```text
+/plugin marketplace add mingleiw/crashlens
+/plugin install crashlens@crashlens
+```
+
+Then just work as usual. When a test panics or a service throws, the agent
+passes the output to crashlens, gets the failing frame in your code, the cause
+and a stable signature, fixes the root cause, and reruns to check the signature
+is gone. The plugin bundles crashlens into one file, so it needs nothing but
+Node.js. Core dumps also need REA and `REA_PWNTOOLS_PYTHON` (see
+[Install](#install)).
+
+Other MCP clients (Cursor, Codex, Claude Desktop, ...) can run the same server
+from a checkout:
+
+```json
+{ "mcpServers": { "crashlens": { "command": "node", "args": ["/path/to/crashlens/plugin/crashlens.mjs", "mcp"] } } }
+```
+
+The skill itself ([plugin/skills/crashlens/SKILL.md](plugin/skills/crashlens/SKILL.md))
+uses only portable frontmatter, so it also works as a standalone Agent Skill.
+
 ## What it recognizes
 
 **Native crashes (core dumps)**
@@ -219,6 +247,7 @@ On systemd distros cores often go to systemd-coredump instead:
 
 ```
 crashlens serve [--port 7777]      [--source DIR]
+crashlens mcp                      MCP server on stdio, for coding agents
 crashlens <core> <binary>          [options]
 crashlens <error.log | ->          [options]
 crashlens --batch <dir> [binary]   [options]
@@ -265,6 +294,7 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [x] Log context, source snippets and git blame
 - [x] Local web app (`crashlens serve`)
 - [x] Optional AI explanation and fix suggestion (off by default)
+- [x] Agent plugin: skill + MCP server (`crashlens mcp`)
 - [ ] Windows minidumps and macOS crash reports
 - [ ] Verify the binary matches the core by build ID
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)

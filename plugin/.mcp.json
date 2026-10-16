@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "crashlens": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/crashlens.mjs", "mcp"]
+    }
+  }
+}

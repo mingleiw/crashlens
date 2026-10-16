@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { renderIssueMarkdown, type Issue } from "./issue.js";
 import { err, ok, type Result } from "./result.js";
 
@@ -30,7 +30,15 @@ export async function suggestFix(
   issue: Issue,
   options: { readonly client?: Anthropic; readonly model?: string } = {},
 ): Promise<Result<AiSuggestion>> {
-  const client = options.client ?? new Anthropic();
+  // Loaded on demand: the bundled agent plugin ships without the SDK, and
+  // nothing else needs it.
+  let sdk: typeof Anthropic;
+  try {
+    sdk = (await import("@anthropic-ai/sdk")).default;
+  } catch {
+    return err("rea_unavailable", "The Anthropic SDK is not installed. Run npm install in crashlens to use --ai.");
+  }
+  const client = options.client ?? new sdk();
   const model = options.model ?? process.env["CRASHLENS_AI_MODEL"] ?? DEFAULT_AI_MODEL;
   try {
     const response = await client.beta.messages.create({
@@ -53,11 +61,11 @@ export async function suggestFix(
     if (text === "") return err("unexpected_rea_output", "The model returned no text.");
     return ok({ model: response.model, markdown: text });
   } catch (error) {
-    return err("rea_unavailable", describeError(error));
+    return err("rea_unavailable", describeError(error, sdk));
   }
 }
 
-function describeError(error: unknown): string {
+function describeError(error: unknown, Anthropic: typeof import("@anthropic-ai/sdk").default): string {
   if (error instanceof Anthropic.AuthenticationError)
     return "Anthropic API credentials were rejected. Check ANTHROPIC_API_KEY.";
   if (error instanceof Anthropic.PermissionDeniedError)

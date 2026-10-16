@@ -71,6 +71,8 @@ src/
   source.ts         --source: map frames to repo files, snippets, git blame
   ai.ts             --ai: optional Claude explanation + fix (Anthropic SDK)
   server.ts         crashlens serve: localhost HTTP API, token + Host checks
+  analyze.ts        text / file / core → Issue, shared by the CLI and MCP server
+  mcp.ts            crashlens mcp: MCP tools over stdio for coding agents
   web/page.ts       the browser UI (HTML/CSS/JS, no external resources)
 
   # core dumps
@@ -87,6 +89,11 @@ src/
   parsers/          goRust.ts, python.ts, java.ts, node.ts, sanitizer.ts
   rules.ts          message → diagnosis rules for every language
   failureIssue.ts   ParsedFailure → Issue (stack, extra stacks, log context)
+plugin/             the Claude Code plugin (marketplace: .claude-plugin/)
+  skills/crashlens/SKILL.md   when and how an agent should use crashlens
+  .mcp.json         starts the MCP server from the bundle
+  crashlens.mjs     generated: the whole CLI in one file (npm run build:plugin;
+                    CI fails if it is stale, so rebuild it after changing src/)
 site/
   browser.ts        the text pipeline bundled for the browser demo
   demo.js           stands in for the local server's API inside the browser
@@ -102,6 +109,7 @@ test/
   source.test.ts    snippets, blame, and the source-folder boundary
   server.test.ts    web API access control and uploads
   ai.test.ts        AI request shape and error handling, against a fake API
+  mcp.test.ts       MCP protocol, tools and error replies
   fixtures/         real captured output (paths anonymized)
   e2e.test.ts       compiles, crashes and triages real C and Go programs
 
@@ -137,6 +145,7 @@ These keep crashlens trustworthy. PRs should preserve them.
 
 - [ ] `npm test` passes (and the e2e test, if you can run it)
 - [ ] `npm run typecheck` passes
+- [ ] Changed `src/`? Run `npm run build:plugin` and commit `plugin/crashlens.mjs`
 - [ ] New behavior has a test, including the failure path where relevant
 - [ ] Report output changes include a before/after example in the PR
 - [ ] No core dumps, binaries or secrets committed

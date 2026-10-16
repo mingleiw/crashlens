@@ -1,0 +1,14 @@
+{
+  "name": "crashlens",
+  "description": "crashlens: find out why your program crashed, as a skill and MCP tools for coding agents.",
+  "owner": { "name": "mingleiw", "url": "https://github.com/mingleiw" },
+  "plugins": [
+    {
+      "name": "crashlens",
+      "source": "./plugin",
+      "description": "Explain why a program crashed or threw (panics, exceptions, sanitizer reports, core dumps) and fix the root cause. Read-only: never runs the program.",
+      "category": "development",
+      "tags": ["debugging", "crash", "core-dump"]
+    }
+  ]
+}

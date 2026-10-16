@@ -23,6 +23,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Agent plugin bundle is up to date
+        run: |
+          npm run build:plugin
+          git diff --exit-code plugin/crashlens.mjs || { echo "::error::plugin/crashlens.mjs is stale. Run npm run build:plugin and commit it."; exit 1; }
 
   end-to-end:
     runs-on: ubuntu-24.04
