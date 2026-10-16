@@ -7,6 +7,13 @@
 
 **[▶ Try the live demo](https://mingleiw.github.io/crashlens/)**: paste a stack trace and see the report, right in your browser.
 
+Use it [in your browser](#use-it-in-your-browser), [from the command line](#or-from-the-command-line),
+or [from your coding agent](#use-it-from-coding-agents) (Claude Code plugin + MCP server):
+
+```text
+/plugin install crashlens --marketplace mingleiw/crashlens
+```
+
 When a program crashes, the logs usually just stop. crashlens reads what the
 crash left behind (a core dump, a panic, an exception, a sanitizer report) and
 writes a bug report you can paste into an issue: where it died, why, the log
@@ -67,9 +74,11 @@ to use it and how to fix the root cause, plus an MCP server with three
 read-only tools (`analyze_failure`, `analyze_core_dump`, `analyze_crash_folder`).
 
 ```text
-/plugin marketplace add mingleiw/crashlens
-/plugin install crashlens@crashlens
+/plugin install crashlens --marketplace mingleiw/crashlens
 ```
+
+On Claude Code older than 2.1.275, use two steps:
+`/plugin marketplace add mingleiw/crashlens`, then `/plugin install crashlens@crashlens`.
 
 Then just work as usual. When a test panics or a service throws, the agent
 passes the output to crashlens, gets the failing frame in your code, the cause
