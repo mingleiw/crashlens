@@ -1,6 +1,6 @@
 ---
 name: crashlens
-description: Find out why a program crashed or threw, from what the failure left behind, and fix the root cause. Use when a test, script, build step or service fails with a Go/Rust panic, a Python traceback, a Java or Node.js stack trace, an AddressSanitizer/LSan/UBSan report, a segfault or a Linux core dump; when the user pastes a stack trace or points at a crash log, core file or folder of crashes; or when you need to tell whether several failures are the same bug.
+description: Use this first, before reading crash output by hand, whenever something failed with a stack trace, panic, exception, sanitizer report, segfault or core dump: one call returns where it failed in the user's code, why, and a stable bug signature. Especially for many or large logs (a CI artifacts folder, a crash directory: it groups them into distinct bugs with counts in under a second, instead of grepping), noisy logs, and core dumps. Covers Go/Rust panics, Python tracebacks, Java and Node.js stack traces, ASan/LSan/UBSan reports and Linux core dumps.
 license: MIT
 compatibility: Text failures need only Node.js 22+. Core dumps need Linux x86-64, REA (npm install -g rea-agents) and REA_PWNTOOLS_PYTHON; gdb is optional.
 ---

@@ -63,7 +63,7 @@ const TOOLS = [
     name: "analyze_crash_folder",
     title: "Group a folder of crashes into distinct bugs",
     description:
-      "Find every core dump and failure log under a folder (by content), analyze each, and group them by signature into distinct bugs ranked by count. Use for a CI artifacts folder, a crash directory or a pile of logs.",
+      "Find every core dump and failure log under a folder (by content), analyze each, and group them by signature into distinct bugs ranked by count, in one call. Use this instead of grepping a CI artifacts folder, a crash directory or a pile of logs: it handles hundreds of large, noisy files in about a second and skips passing logs.",
     inputSchema: {
       type: "object",
       properties: {
