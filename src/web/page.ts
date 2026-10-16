@@ -38,7 +38,7 @@ export const INDEX_HTML = String.raw`<!doctype html>
       <textarea id="text" rows="7" spellcheck="false" placeholder="…or paste a stack trace, panic, traceback or log here"></textarea>
       <div class="row end"><button id="analyze" class="btn">Analyze</button></div>
     </section>
-    <section class="card">
+    <section class="card" id="sourceCard">
       <label class="label" for="source">Your source code <span class="muted">(optional)</span></label>
       <div class="row"><input id="source" placeholder="/absolute/path/to/your/repo" spellcheck="false"><button id="setSource" class="btn secondary">Set</button></div>
       <div class="hint" id="sourceHint">Shows the failing lines and who last changed them.</div>
@@ -168,7 +168,7 @@ export const APP_JS = String.raw`
     if (match) { token = match[1]; sessionStorage.setItem("crashlens-token", token); }
     else { token = sessionStorage.getItem("crashlens-token") || ""; }
   } catch (e) { if (match) token = match[1]; }
-  if (match) history.replaceState(null, "", "/");
+  if (match) history.replaceState(null, "", location.pathname);
 
   var $ = function (id) { return document.getElementById(id); };
   var state = { issues: [], selected: null, core: null, binary: null, aiEnabled: false };

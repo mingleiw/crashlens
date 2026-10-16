@@ -3,3 +3,4 @@ dist/
 core
 core.*
 *.core
+site/dist/

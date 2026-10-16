@@ -5,6 +5,8 @@
 
 **Logs tell you where your program was. crashlens tells you why it died.**
 
+**[▶ Try the live demo](https://mingleiw.github.io/crashlens/)**: paste a stack trace and see the report, right in your browser.
+
 When a program crashes, the logs usually just stop. crashlens reads what the
 crash left behind (a core dump, a panic, an exception, a sanitizer report) and
 writes a bug report you can paste into an issue: where it died, why, the log
@@ -28,6 +30,11 @@ crashlens ./core ./parser > crash.md
 > crashes are the best test cases.
 
 ## Use it in your browser
+
+The [live demo](https://mingleiw.github.io/crashlens/) runs the same interface
+with sample bugs. Pasted text is analyzed in your browser and never uploaded.
+To analyze core dumps, read your source code or watch live logs, run it
+locally:
 
 ```bash
 crashlens serve

@@ -87,6 +87,12 @@ src/
   parsers/          goRust.ts, python.ts, java.ts, node.ts, sanitizer.ts
   rules.ts          message → diagnosis rules for every language
   failureIssue.ts   ParsedFailure → Issue (stack, extra stacks, log context)
+site/
+  browser.ts        the text pipeline bundled for the browser demo
+  demo.js           stands in for the local server's API inside the browser
+  build.mjs         builds site/dist (npm run build:site); check.mjs compares
+                    the browser bundle with Node on every fixture
+  make-demo-data.mjs  regenerates the demo's preloaded sample reports
 test/
   unit.test.ts      core-dump logic, using fixtures shaped like real REA/gdb output
   panic.test.ts     Go/Rust panics and batch grouping

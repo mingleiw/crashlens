@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:site": "npm run build && node site/build.mjs && node site/check.mjs"
   },
   "peerDependencies": {
     "rea-agents": ">=6.4.0"
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
+    "esbuild": "^0.25.10",
     "typescript": "^5.9.0"
   },
   "repository": {
