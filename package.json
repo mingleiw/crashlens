@@ -1,5 +1,5 @@
 {
-  "name": "crashlens",
+  "name": "@mingleiw/crashlens",
   "version": "0.1.0",
   "description": "Turn a Linux core dump into a readable bug report: where it died and why, with evidence. Never runs your program.",
   "license": "MIT",
@@ -17,6 +17,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
     "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:site": "npm run build && node site/build.mjs && node site/check.mjs",
@@ -42,6 +43,9 @@
   "homepage": "https://github.com/mingleiw/crashlens#readme",
   "bugs": {
     "url": "https://github.com/mingleiw/crashlens/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "crash",

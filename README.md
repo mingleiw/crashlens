@@ -267,6 +267,24 @@ Every claim traces back to evidence. The report lists the sha256 of the core
 and binary and REA's evidence IDs, and separates what was recorded, what was
 computed, and what is a best guess (with a confidence level).
 
+## Try it without installing
+
+Panics, exceptions and sanitizer reports need only Node.js 22.19+:
+
+```bash
+python3 app.py 2>&1 | npx -y github:mingleiw/crashlens -
+```
+
+For coding agents (Claude Code, Hermes, Grok Bot or any MCP client), the MCP
+server command is:
+
+```bash
+npx -y github:mingleiw/crashlens mcp
+```
+
+The first run builds crashlens, so it takes a minute. Core dumps need the full
+install below.
+
 ## Install
 
 Requirements: Linux x86-64, Node.js 22.19+ (or 24.11+), and Python 3.
