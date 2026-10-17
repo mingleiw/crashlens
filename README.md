@@ -94,6 +94,10 @@ from a checkout:
 { "mcpServers": { "crashlens": { "command": "node", "args": ["/path/to/crashlens/plugin/crashlens.mjs", "mcp"] } } }
 ```
 
+No plugin? [docs/prompts/crash-triage.md](docs/prompts/crash-triage.md) is a
+copy-paste prompt that walks any agent with REA connected from a core dump to a
+root cause, the same way crashlens does.
+
 The skill itself ([plugin/skills/crashlens/SKILL.md](plugin/skills/crashlens/SKILL.md))
 uses only portable frontmatter, so it also works as a standalone Agent Skill.
 
