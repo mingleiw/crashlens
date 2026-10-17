@@ -45,6 +45,15 @@ export interface LayoutSymbol {
   readonly name: string;
   readonly value: bigint;
   readonly size: bigint;
+  /** "eh_frame": no symbol table entry; a sub_<address> name from unwind tables. */
+  readonly origin?: "symbol" | "eh_frame";
+}
+
+/** Pseudocode for one function from REA's decompiler provider (Ghidra, Hopper or IDA). */
+export interface Decompilation {
+  readonly evidenceId: string;
+  readonly pseudocode: string;
+  readonly provider: string | null;
 }
 
 export interface LayoutSegment {
@@ -95,12 +104,13 @@ function commandFor(path: string): ReaCommand {
 function runRea(
   rea: ReaCommand,
   args: readonly string[],
+  timeout = READ_TIMEOUT_MS,
 ): Promise<Result<unknown>> {
   return new Promise((resolve) => {
     execFile(
       rea.file,
       [...rea.args, ...args, "--json"],
-      { maxBuffer: MAX_OUTPUT_BYTES, timeout: READ_TIMEOUT_MS },
+      { maxBuffer: MAX_OUTPUT_BYTES, timeout },
       (error, stdout) => {
         if (error && "code" in error && error.code === "ENOENT") {
           resolve(
@@ -176,6 +186,35 @@ export async function inspectBinaryLayout(
       "unexpected_rea_output",
       `REA layout evidence had an unexpected shape: ${(cause as Error).message}`,
     );
+  }
+}
+
+/** Native decompilation imports and analyzes the whole binary first; large ones take minutes. */
+const DECOMPILE_TIMEOUT_MS = 900_000;
+
+/**
+ * Decompile the function at `address` (the decompiler's address space, e.g.
+ * Ghidra places PIE images at 0x100000). Static: the binary is never run.
+ */
+export async function decompileFunction(
+  rea: ReaCommand,
+  binaryPath: string,
+  /** Address in Ghidra's space, or a function name. */
+  target: bigint | string,
+): Promise<Result<Decompilation>> {
+  const where = typeof target === "string" ? target : `0x${target.toString(16)}`;
+  // Addresses here assume Ghidra's image base, so pin that provider.
+  const result = await runRea(rea, ["decompile", binaryPath, where, "--provider", "ghidra"], DECOMPILE_TIMEOUT_MS);
+  if (!result.ok) return result;
+  try {
+    const root = record(result.value, "evidence");
+    const pseudocode = root["normalized_result"];
+    if (typeof pseudocode !== "string" || pseudocode.trim() === "")
+      return err("unexpected_rea_output", "REA returned no pseudocode for that address (an external or bodyless function).");
+    const provider = isRecord(root["provider"]) && typeof root["provider"]["id"] === "string" ? root["provider"]["id"] : null;
+    return ok({ evidenceId: string(root["evidence_id"], "evidence_id"), pseudocode: pseudocode.trim(), provider });
+  } catch (cause) {
+    return err("unexpected_rea_output", `REA decompile output had an unexpected shape: ${(cause as Error).message}`);
   }
 }
 

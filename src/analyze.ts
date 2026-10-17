@@ -43,11 +43,14 @@ export interface CoreInput {
   readonly logPath?: string | undefined;
   readonly rea: ReaCommand;
   readonly gdb: string | null;
+  /** REA + Ghidra pseudocode of the crashing function; "auto" decompiles stripped functions when Ghidra is set up. */
+  readonly decompile?: boolean | "auto";
+  readonly decompileCaller?: boolean;
 }
 
 /** A Linux core dump plus the binary that crashed. Paths must be absolute. */
 export async function analyzeCore(input: CoreInput): Promise<Analysis> {
-  const result = await triage({ corePath: input.corePath, binaryPath: input.binaryPath, rea: input.rea, gdb: input.gdb });
+  const result = await triage({ corePath: input.corePath, binaryPath: input.binaryPath, rea: input.rea, gdb: input.gdb, decompile: input.decompile ?? "auto", decompileCaller: input.decompileCaller ?? true });
   if (!result.ok) return { ok: false, message: result.error.message };
   let issue = toCoreIssue(result.value);
   if (input.logPath !== undefined) {

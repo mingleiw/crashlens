@@ -81,6 +81,8 @@ src/
   rea.ts            runs the REA CLI and parses the facts we use
   ntFile.ts         parses the core's list of mapped files (NT_FILE)
   symbolize.ts      load bias + symbols: runtime address → function+offset
+  elf.ts            build IDs (binary and core image), .eh_frame function ranges
+  disasm.ts         objdump window around the faulting instruction
   gdb.ts            optional gdb backtrace and disassembly (core file only)
   classify.ts       signal → crash type, explanation, next steps, confidence
 

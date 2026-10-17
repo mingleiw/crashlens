@@ -15,7 +15,8 @@ export function toCoreIssue(report: TriageReport): Issue {
       language: "",
       lines: report.frames.map(frameLine),
     });
-  if (report.instructions.length > 0)
+  const showsFunction = report.focus?.reason === "fault" && (report.disassembly?.length ?? 0) > 0;
+  if (report.instructions.length > 0 && !showsFunction)
     sections.push({
       heading: "Instructions at the fault",
       kind: "code",
@@ -23,6 +24,26 @@ export function toCoreIssue(report: TriageReport): Issue {
       lines: report.instructions.map(
         (insn) => `${insn.isFault ? "=> " : "   "}${insn.text}`,
       ),
+    });
+  if (report.focus !== null && report.disassembly !== null && report.disassembly.length > 0) {
+    const f = report.focus;
+    const origin = f.fromUnwindTables ? " (no symbol; boundaries from .eh_frame)" : "";
+    sections.push({
+      heading: f.reason === "fault" ? `Function around the fault: \`${f.name}\`` : `Call site in your binary: \`${f.name}\``,
+      kind: "code",
+      language: "asm",
+      lines: [
+        `; ${f.name} @ ${hex(f.start)}-${hex(f.end)}${origin}, link-time addresses, objdump`,
+        ...report.disassembly.map((line) => `${line.marked ? "=> " : "   "}${hex(line.address)}: ${line.text}`),
+      ],
+    });
+  }
+  for (const fn of report.decompiled)
+    sections.push({
+      heading: `Decompiled ${fn.role === "caller" ? "caller " : ""}\`${fn.name}\` (REA + ${fn.provider ?? "decompiler"}: decompiler output, not your source)`,
+      kind: "code",
+      language: "c",
+      lines: fn.pseudocode.split("\n"),
     });
   if (report.relevantRegisters.length > 0)
     sections.push({
@@ -70,6 +91,17 @@ export function toCoreIssue(report: TriageReport): Issue {
       ...(where?.source == null
         ? []
         : [{ label: "Source", value: `\`${where.source}\`` }]),
+      ...(report.buildId.status === "unknown"
+        ? []
+        : [
+            {
+              label: "Build ID",
+              value:
+                report.buildId.status === "match"
+                  ? `matches the core (\`${report.buildId.binary?.slice(0, 12)}…\`)`
+                  : `**mismatch**: binary \`${report.buildId.binary?.slice(0, 12)}…\`, core \`${report.buildId.core?.slice(0, 12)}…\``,
+            },
+          ]),
     ],
     sections,
     locations: report.frames.flatMap((frame) => {
@@ -85,7 +117,7 @@ export function toCoreIssue(report: TriageReport): Issue {
     evidence: [
       `Core: \`${report.corePath}\` (sha256 \`${crash.coreSha256}\`)`,
       `Binary: \`${report.binaryPath}\` (sha256 \`${report.layout.binarySha256}\`, ${report.layout.imageType})`,
-      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\``,
+      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\`${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
       `gdb: ${report.gdb.status}${report.gdb.reason === undefined ? "" : ` (${report.gdb.reason})`}`,
       ...(report.layout.mitigations === null
         ? []
@@ -152,5 +184,9 @@ export function coreDetails(report: TriageReport): unknown {
     registers: report.crash.registers,
     signal: report.crash.signal,
     gdb: report.gdb,
+    buildId: report.buildId,
+    focus: report.focus,
+    disassembly: report.disassembly,
+    decompiled: report.decompiled,
   };
 }

@@ -1,10 +1,20 @@
 {
   "name": "crashlens",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Explain why a program crashed or threw (panics, exceptions, sanitizer reports, core dumps) and fix the root cause. Read-only: never runs the program.",
-  "author": { "name": "mingleiw", "url": "https://github.com/mingleiw" },
+  "author": {
+    "name": "mingleiw",
+    "url": "https://github.com/mingleiw"
+  },
   "homepage": "https://github.com/mingleiw/crashlens",
   "repository": "https://github.com/mingleiw/crashlens",
   "license": "MIT",
-  "keywords": ["debugging", "crash", "stack-trace", "core-dump", "sanitizer", "triage"]
+  "keywords": [
+    "debugging",
+    "crash",
+    "stack-trace",
+    "core-dump",
+    "sanitizer",
+    "triage"
+  ]
 }

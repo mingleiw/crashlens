@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { rangeFor, type FunctionRange } from "./elf.js";
 import type { FileMapping } from "./ntFile.js";
 import type { BinaryLayout, LayoutSymbol } from "./rea.js";
 
@@ -32,6 +33,8 @@ export interface Symbolizer {
   /** Load bias of the analyzed binary in the crashed process, if established. */
   readonly loadBias: bigint | null;
   readonly binaryFoundInCore: boolean;
+  /** Runtime address where the binary's first page is mapped, if found. */
+  readonly imageBase: bigint | null;
   locate(address: bigint): Location;
 }
 
@@ -44,8 +47,12 @@ export function createSymbolizer(
   binaryPath: string,
   mappings: readonly FileMapping[],
   layout: BinaryLayout,
+  /** Function boundaries from .eh_frame, used when the symbol table has no entry. */
+  unwindRanges: readonly FunctionRange[] = [],
+  /** Mapped file name of the binary in the core, when it differs from the local name (matched by build ID). */
+  mappedName: string = basename(binaryPath),
 ): Symbolizer {
-  const name = basename(binaryPath);
+  const name = mappedName;
   const own = mappings.filter((mapping) => basename(mapping.path) === name);
   const loadBias = computeLoadBias(own, layout);
   const moduleBase = new Map<string, bigint>();
@@ -58,6 +65,7 @@ export function createSymbolizer(
   return {
     loadBias,
     binaryFoundInCore: own.length > 0,
+    imageBase: own.filter((m) => m.fileOffset === 0n).reduce<bigint | null>((min, m) => (min === null || m.start < min ? m.start : min), null),
     locate(address) {
       const mapping = mappings.find(
         (entry) => address >= entry.start && address < entry.end,
@@ -78,14 +86,20 @@ export function createSymbolizer(
           (linked < entry.value + entry.size ||
             (entry.size === 0n && linked === entry.value)),
       );
-      return symbol === undefined
+      const range = symbol === undefined ? rangeFor(unwindRanges, linked) : null;
+      const found: LayoutSymbol | undefined =
+        symbol ??
+        (range === null
+          ? undefined
+          : { name: `sub_${range.start.toString(16)}`, value: range.start, size: range.end === null ? 0n : range.end - range.start, origin: "eh_frame" });
+      return found === undefined
         ? { kind: "binary", module, moduleOffset: linked }
         : {
             kind: "binary-function",
             module,
             moduleOffset: linked,
-            symbol,
-            symbolOffset: linked - symbol.value,
+            symbol: found,
+            symbolOffset: linked - found.value,
           };
     },
   };

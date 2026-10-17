@@ -11,9 +11,226 @@ import { readFileSync } from "node:fs";
 
 // src/symbolize.ts
 import { basename } from "node:path";
+
+// src/elf.ts
+import { open } from "node:fs/promises";
+var PT_LOAD = 1;
+var PT_NOTE = 4;
+var PT_GNU_EH_FRAME = 1685382480;
+var NT_GNU_BUILD_ID = 3;
+var MAX_PHDRS = 4096;
+var MAX_NOTE_BYTES = 1 << 20;
+var MAX_FDES = 1 << 20;
+async function readAt(file, offset, length) {
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await file.read(buffer, 0, length, Number(offset));
+  return buffer.subarray(0, bytesRead);
+}
+async function readHeaders(file) {
+  const header = await readAt(file, 0n, 64);
+  if (header.length < 64 || header.readUInt32BE(0) !== 2135247942 || header[4] !== 2 || header[5] !== 1) return null;
+  const type = header.readUInt16LE(16);
+  const phoff = header.readBigUInt64LE(32);
+  const phentsize = header.readUInt16LE(54);
+  const phnum = header.readUInt16LE(56);
+  if (phentsize < 56 || phnum > MAX_PHDRS) return null;
+  const table = await readAt(file, phoff, phentsize * phnum);
+  const phdrs = [];
+  for (let i = 0; i + 1 <= phnum && (i + 1) * phentsize <= table.length; i++) {
+    const base = i * phentsize;
+    phdrs.push({
+      type: table.readUInt32LE(base),
+      offset: table.readBigUInt64LE(base + 8),
+      vaddr: table.readBigUInt64LE(base + 16),
+      fileSize: table.readBigUInt64LE(base + 32),
+      memSize: table.readBigUInt64LE(base + 40)
+    });
+  }
+  return { type, phdrs };
+}
+function buildIdFromNotes(notes) {
+  let pos = 0;
+  while (pos + 12 <= notes.length) {
+    const nameSize = notes.readUInt32LE(pos);
+    const descSize = notes.readUInt32LE(pos + 4);
+    const type = notes.readUInt32LE(pos + 8);
+    const nameStart = pos + 12;
+    const descStart = nameStart + (nameSize + 3 & ~3);
+    const next = descStart + (descSize + 3 & ~3);
+    if (descStart + descSize > notes.length) return null;
+    const name = notes.subarray(nameStart, nameStart + nameSize).toString("latin1");
+    if (type === NT_GNU_BUILD_ID && name === "GNU\0") return notes.subarray(descStart, descStart + descSize).toString("hex");
+    pos = next;
+  }
+  return null;
+}
+async function isPositionIndependent(path) {
+  const file = await open(path, "r");
+  try {
+    return (await readHeaders(file))?.type === 3;
+  } finally {
+    await file.close();
+  }
+}
+async function binaryBuildId(path) {
+  const file = await open(path, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null) return null;
+    for (const ph of headers.phdrs) {
+      if (ph.type !== PT_NOTE || ph.fileSize > BigInt(MAX_NOTE_BYTES)) continue;
+      const id = buildIdFromNotes(await readAt(file, ph.offset, Number(ph.fileSize)));
+      if (id !== null) return id;
+    }
+    return null;
+  } finally {
+    await file.close();
+  }
+}
+async function readCoreMemory(file, loads, address, length) {
+  const segment = loads.find((ph) => address >= ph.vaddr && address + BigInt(length) <= ph.vaddr + ph.fileSize);
+  if (segment === void 0) return null;
+  const bytes = await readAt(file, segment.offset + (address - segment.vaddr), length);
+  return bytes.length === length ? bytes : null;
+}
+async function coreImageBuildId(corePath, imageBase) {
+  const file = await open(corePath, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null || headers.type !== 4) return null;
+    const loads = headers.phdrs.filter((ph) => ph.type === PT_LOAD);
+    const ehdr = await readCoreMemory(file, loads, imageBase, 64);
+    if (ehdr === null || ehdr.readUInt32BE(0) !== 2135247942) return null;
+    const phoff = ehdr.readBigUInt64LE(32);
+    const phentsize = ehdr.readUInt16LE(54);
+    const phnum = ehdr.readUInt16LE(56);
+    if (phentsize < 56 || phnum > MAX_PHDRS) return null;
+    const table = await readCoreMemory(file, loads, imageBase + phoff, phentsize * phnum);
+    if (table === null) return null;
+    let linkBase = null;
+    const notes = [];
+    for (let i = 0; i < phnum; i++) {
+      const base = i * phentsize;
+      const type = table.readUInt32LE(base);
+      const vaddr = table.readBigUInt64LE(base + 16);
+      const size = table.readBigUInt64LE(base + 32);
+      if (type === PT_LOAD && linkBase === null) linkBase = vaddr & ~0xfffn;
+      if (type === PT_NOTE && size <= BigInt(MAX_NOTE_BYTES)) notes.push({ vaddr, size: Number(size) });
+    }
+    if (linkBase === null) return null;
+    for (const note of notes) {
+      const bytes = await readCoreMemory(file, loads, imageBase + (note.vaddr - linkBase), note.size);
+      const id = bytes === null ? null : buildIdFromNotes(bytes);
+      if (id !== null) return id;
+    }
+    return null;
+  } finally {
+    await file.close();
+  }
+}
+function readEncoded(buf, pos, encoding, fieldAddress, dataRel) {
+  const format = encoding & 15;
+  const application = encoding & 112;
+  let value;
+  let size;
+  switch (format) {
+    case 3:
+      value = BigInt(buf.readUInt32LE(pos));
+      size = 4;
+      break;
+    // udata4
+    case 11:
+      value = BigInt(buf.readInt32LE(pos));
+      size = 4;
+      break;
+    // sdata4
+    case 4:
+      value = buf.readBigUInt64LE(pos);
+      size = 8;
+      break;
+    // udata8
+    case 12:
+      value = buf.readBigInt64LE(pos);
+      size = 8;
+      break;
+    // sdata8
+    default:
+      return null;
+  }
+  if (application === 16) value += fieldAddress;
+  else if (application === 48) value += dataRel;
+  else if (application !== 0) return null;
+  return { value: BigInt.asUintN(64, value), size };
+}
+async function functionRanges(path) {
+  const file = await open(path, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null) return [];
+    const hdrPh = headers.phdrs.find((ph) => ph.type === PT_GNU_EH_FRAME);
+    if (hdrPh === void 0 || hdrPh.fileSize < 12n || hdrPh.fileSize > BigInt(64 << 20)) return [];
+    const hdr = await readAt(file, hdrPh.offset, Number(hdrPh.fileSize));
+    const [version, framePtrEnc, countEnc, tableEnc] = [hdr[0], hdr[1], hdr[2], hdr[3]];
+    if (version !== 1 || framePtrEnc === void 0 || countEnc === void 0 || tableEnc === void 0) return [];
+    const hdrAddr = hdrPh.vaddr;
+    const framePtr = readEncoded(hdr, 4, framePtrEnc, hdrAddr + 4n, hdrAddr);
+    if (framePtr === null) return [];
+    let pos = 4 + framePtr.size;
+    const count = readEncoded(hdr, pos, countEnc, hdrAddr + BigInt(pos), hdrAddr);
+    if (count === null || count.value > BigInt(MAX_FDES)) return [];
+    pos += count.size;
+    const fieldSize = (tableEnc & 15) === 11 || (tableEnc & 15) === 3 ? 4 : 8;
+    const entries = [];
+    for (let i = 0n; i < count.value && pos + 2 * fieldSize <= hdr.length; i++) {
+      const start = readEncoded(hdr, pos, tableEnc, hdrAddr + BigInt(pos), hdrAddr);
+      const fde = readEncoded(hdr, pos + fieldSize, tableEnc, hdrAddr + BigInt(pos + fieldSize), hdrAddr);
+      if (start === null || fde === null) return [];
+      entries.push({ start: start.value, fde: fde.value });
+      pos += 2 * fieldSize;
+    }
+    const toOffset = (address) => {
+      const seg = headers.phdrs.find((ph) => ph.type === PT_LOAD && address >= ph.vaddr && address < ph.vaddr + ph.fileSize);
+      return seg === void 0 ? null : seg.offset + (address - seg.vaddr);
+    };
+    const ranges = [];
+    for (const entry of entries) {
+      let end = null;
+      const offset = toOffset(entry.fde);
+      if (offset !== null) {
+        const fde = await readAt(file, offset, 16);
+        if (fde.length === 16 && fde.readUInt32LE(0) !== 4294967295) {
+          const begin = entry.fde + 8n + BigInt(fde.readInt32LE(8));
+          if (BigInt.asUintN(64, begin) === entry.start) end = entry.start + BigInt(fde.readUInt32LE(12));
+        }
+      }
+      ranges.push({ start: entry.start, end });
+    }
+    return ranges.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
+  } finally {
+    await file.close();
+  }
+}
+function rangeFor(ranges, linked) {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  let best = null;
+  while (lo <= hi) {
+    const mid = lo + hi >> 1;
+    const range = ranges[mid];
+    if (range.start <= linked) {
+      best = range;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  if (best === null) return null;
+  if (best.end !== null) return linked < best.end ? best : null;
+  return best;
+}
+
+// src/symbolize.ts
 var PAGE_MASK = ~0xfffn;
-function createSymbolizer(binaryPath, mappings, layout) {
-  const name = basename(binaryPath);
+function createSymbolizer(binaryPath, mappings, layout, unwindRanges = [], mappedName = basename(binaryPath)) {
+  const name = mappedName;
   const own = mappings.filter((mapping) => basename(mapping.path) === name);
   const loadBias = computeLoadBias(own, layout);
   const moduleBase = /* @__PURE__ */ new Map();
@@ -25,6 +242,7 @@ function createSymbolizer(binaryPath, mappings, layout) {
   return {
     loadBias,
     binaryFoundInCore: own.length > 0,
+    imageBase: own.filter((m) => m.fileOffset === 0n).reduce((min, m) => min === null || m.start < min ? m.start : min, null),
     locate(address) {
       const mapping = mappings.find(
         (entry) => address >= entry.start && address < entry.end
@@ -41,12 +259,14 @@ function createSymbolizer(binaryPath, mappings, layout) {
       const symbol = layout.functions.find(
         (entry) => linked >= entry.value && (linked < entry.value + entry.size || entry.size === 0n && linked === entry.value)
       );
-      return symbol === void 0 ? { kind: "binary", module, moduleOffset: linked } : {
+      const range = symbol === void 0 ? rangeFor(unwindRanges, linked) : null;
+      const found = symbol ?? (range === null ? void 0 : { name: `sub_${range.start.toString(16)}`, value: range.start, size: range.end === null ? 0n : range.end - range.start, origin: "eh_frame" });
+      return found === void 0 ? { kind: "binary", module, moduleOffset: linked } : {
         kind: "binary-function",
         module,
         moduleOffset: linked,
-        symbol,
-        symbolOffset: linked - symbol.value
+        symbol: found,
+        symbolOffset: linked - found.value
       };
     }
   };
@@ -88,7 +308,8 @@ function toCoreIssue(report) {
       language: "",
       lines: report.frames.map(frameLine)
     });
-  if (report.instructions.length > 0)
+  const showsFunction = report.focus?.reason === "fault" && (report.disassembly?.length ?? 0) > 0;
+  if (report.instructions.length > 0 && !showsFunction)
     sections.push({
       heading: "Instructions at the fault",
       kind: "code",
@@ -96,6 +317,26 @@ function toCoreIssue(report) {
       lines: report.instructions.map(
         (insn) => `${insn.isFault ? "=> " : "   "}${insn.text}`
       )
+    });
+  if (report.focus !== null && report.disassembly !== null && report.disassembly.length > 0) {
+    const f = report.focus;
+    const origin = f.fromUnwindTables ? " (no symbol; boundaries from .eh_frame)" : "";
+    sections.push({
+      heading: f.reason === "fault" ? `Function around the fault: \`${f.name}\`` : `Call site in your binary: \`${f.name}\``,
+      kind: "code",
+      language: "asm",
+      lines: [
+        `; ${f.name} @ ${hex(f.start)}-${hex(f.end)}${origin}, link-time addresses, objdump`,
+        ...report.disassembly.map((line) => `${line.marked ? "=> " : "   "}${hex(line.address)}: ${line.text}`)
+      ]
+    });
+  }
+  for (const fn of report.decompiled)
+    sections.push({
+      heading: `Decompiled ${fn.role === "caller" ? "caller " : ""}\`${fn.name}\` (REA + ${fn.provider ?? "decompiler"}: decompiler output, not your source)`,
+      kind: "code",
+      language: "c",
+      lines: fn.pseudocode.split("\n")
     });
   if (report.relevantRegisters.length > 0)
     sections.push({
@@ -132,7 +373,13 @@ function toCoreIssue(report) {
         label: "Location",
         value: report.faultLocation === null ? "unknown" : `\`${formatLocation(report.faultLocation)}\``
       },
-      ...where?.source == null ? [] : [{ label: "Source", value: `\`${where.source}\`` }]
+      ...where?.source == null ? [] : [{ label: "Source", value: `\`${where.source}\`` }],
+      ...report.buildId.status === "unknown" ? [] : [
+        {
+          label: "Build ID",
+          value: report.buildId.status === "match" ? `matches the core (\`${report.buildId.binary?.slice(0, 12)}\u2026\`)` : `**mismatch**: binary \`${report.buildId.binary?.slice(0, 12)}\u2026\`, core \`${report.buildId.core?.slice(0, 12)}\u2026\``
+        }
+      ]
     ],
     sections,
     locations: report.frames.flatMap((frame2) => {
@@ -148,7 +395,7 @@ function toCoreIssue(report) {
     evidence: [
       `Core: \`${report.corePath}\` (sha256 \`${crash.coreSha256}\`)`,
       `Binary: \`${report.binaryPath}\` (sha256 \`${report.layout.binarySha256}\`, ${report.layout.imageType})`,
-      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\``,
+      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\`${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
       `gdb: ${report.gdb.status}${report.gdb.reason === void 0 ? "" : ` (${report.gdb.reason})`}`,
       ...report.layout.mitigations === null ? [] : [
         `Build hardening (static, inferred): ${mitigations(report.layout.mitigations)}`
@@ -195,7 +442,11 @@ function coreDetails(report) {
     frames: report.frames,
     registers: report.crash.registers,
     signal: report.crash.signal,
-    gdb: report.gdb
+    gdb: report.gdb,
+    buildId: report.buildId,
+    focus: report.focus,
+    disassembly: report.disassembly,
+    decompiled: report.decompiled
   };
 }
 
@@ -1746,8 +1997,52 @@ function refineWithFrames(base, frameFunctions) {
   return base;
 }
 
-// src/gdb.ts
+// src/disasm.ts
 import { execFile } from "node:child_process";
+var OBJDUMP_TIMEOUT_MS = 3e4;
+var BEFORE = 16;
+var AFTER = 4;
+function disassembleAround(binaryPath, start, end, target, objdump = "objdump") {
+  const args = [
+    "-d",
+    "--no-show-raw-insn",
+    "--wide",
+    `--start-address=0x${start.toString(16)}`,
+    `--stop-address=0x${end.toString(16)}`,
+    "--",
+    binaryPath
+  ];
+  return new Promise((resolve3) => {
+    execFile(objdump, args, { timeout: OBJDUMP_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        resolve3(null);
+        return;
+      }
+      resolve3(windowAround(parseObjdump(stdout), target));
+    });
+  });
+}
+function parseObjdump(output) {
+  const lines = [];
+  for (const line of output.split("\n")) {
+    const match = /^\s+([0-9a-f]+):\s+(.+?)\s*$/.exec(line);
+    if (match === null) continue;
+    const text = match[2].replace(/\s+/g, " ").replace(/ <[^>]*\+0x[0-9a-f]+>/g, "");
+    if (text === "(bad)" || text.startsWith("...")) continue;
+    lines.push({ address: BigInt(`0x${match[1]}`), text });
+  }
+  return lines;
+}
+function windowAround(lines, target) {
+  if (lines.length === 0) return null;
+  let index = -1;
+  for (let i = 0; i < lines.length; i++) if (lines[i].address <= target) index = i;
+  if (index === -1) return null;
+  return lines.slice(Math.max(0, index - BEFORE), index + AFTER + 1).map((line) => ({ ...line, marked: line === lines[index] }));
+}
+
+// src/gdb.ts
+import { execFile as execFile2 } from "node:child_process";
 var GDB_TIMEOUT_MS = 6e4;
 var MAX_FRAMES = 32;
 var MARK = "@@crashlens@@";
@@ -1777,7 +2072,7 @@ function inspectWithGdb(binaryPath, corePath, gdbPath = "gdb") {
     corePath
   ];
   return new Promise((resolve3) => {
-    execFile(
+    execFile2(
       gdbPath,
       args,
       { timeout: GDB_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
@@ -1887,7 +2182,7 @@ function parseNtFile(descriptor) {
 }
 
 // src/rea.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -1908,12 +2203,12 @@ function resolveReaCommand(env = process.env) {
 function commandFor(path) {
   return /\.(c|m)?js$/.test(path) ? { file: process.execPath, args: [path] } : { file: path, args: [] };
 }
-function runRea(rea, args) {
+function runRea(rea, args, timeout = READ_TIMEOUT_MS) {
   return new Promise((resolve3) => {
-    execFile2(
+    execFile3(
       rea.file,
       [...rea.args, ...args, "--json"],
-      { maxBuffer: MAX_OUTPUT_BYTES, timeout: READ_TIMEOUT_MS },
+      { maxBuffer: MAX_OUTPUT_BYTES, timeout },
       (error, stdout) => {
         if (error && "code" in error && error.code === "ENOENT") {
           resolve3(
@@ -1973,6 +2268,22 @@ async function inspectBinaryLayout(rea, binaryPath) {
       "unexpected_rea_output",
       `REA layout evidence had an unexpected shape: ${cause.message}`
     );
+  }
+}
+var DECOMPILE_TIMEOUT_MS = 9e5;
+async function decompileFunction(rea, binaryPath, target) {
+  const where = typeof target === "string" ? target : `0x${target.toString(16)}`;
+  const result = await runRea(rea, ["decompile", binaryPath, where, "--provider", "ghidra"], DECOMPILE_TIMEOUT_MS);
+  if (!result.ok) return result;
+  try {
+    const root = record(result.value, "evidence");
+    const pseudocode = root["normalized_result"];
+    if (typeof pseudocode !== "string" || pseudocode.trim() === "")
+      return err("unexpected_rea_output", "REA returned no pseudocode for that address (an external or bodyless function).");
+    const provider = isRecord(root["provider"]) && typeof root["provider"]["id"] === "string" ? root["provider"]["id"] : null;
+    return ok({ evidenceId: string(root["evidence_id"], "evidence_id"), pseudocode: pseudocode.trim(), provider });
+  } catch (cause) {
+    return err("unexpected_rea_output", `REA decompile output had an unexpected shape: ${cause.message}`);
   }
 }
 function parseRecordedCrash(evidence) {
@@ -2068,6 +2379,8 @@ function hex2(value, path) {
 }
 
 // src/triage.ts
+var NO_FILE_FACTS = { unwindRanges: [], buildId: { binary: null, core: null, status: "unknown" } };
+var UNSIZED_FUNCTION_BYTES = 0x400n;
 async function triage(options) {
   const [crash, layout, gdb] = await Promise.all([
     inspectRecordedCrash(options.rea, options.corePath),
@@ -2079,9 +2392,60 @@ async function triage(options) {
   ]);
   if (!crash.ok) return crash;
   if (!layout.ok) return layout;
-  return buildReport(options, crash.value, layout.value, gdb);
+  const facts = await readFileFacts(options, crash.value);
+  const report = buildReport(options, crash.value, layout.value, gdb, facts);
+  if (!report.ok) return report;
+  return ok(await explainFocus(options, report.value));
 }
-function buildReport(options, crash, layout, gdb) {
+async function readFileFacts(options, crash) {
+  const quiet = (promise, fallback2) => promise.catch(() => fallback2);
+  const mappings = crash.ntFileDescriptor === null ? null : parseNtFile(crash.ntFileDescriptor);
+  const name = basename3(options.binaryPath);
+  const images = mappings?.ok ? mappings.mappings.filter((m) => m.fileOffset === 0n) : [];
+  const base = images.filter((m) => basename3(m.path) === name).map((m) => m.start).sort((a, b) => a < b ? -1 : 1)[0];
+  const [unwindRanges, binary, core] = await Promise.all([
+    quiet(functionRanges(options.binaryPath), []),
+    quiet(binaryBuildId(options.binaryPath), null),
+    base === void 0 ? Promise.resolve(null) : quiet(coreImageBuildId(options.corePath, base), null)
+  ]);
+  if (base === void 0 && binary !== null) {
+    for (const image of images) {
+      if (await quiet(coreImageBuildId(options.corePath, image.start), null) === binary)
+        return { unwindRanges, buildId: { binary, core: binary, status: "match" }, mappedName: basename3(image.path) };
+    }
+  }
+  const status = binary === null || core === null ? "unknown" : binary === core ? "match" : "mismatch";
+  return { unwindRanges, buildId: { binary, core, status } };
+}
+async function explainFocus(options, report) {
+  const focus = report.focus;
+  if (focus === null) return report;
+  const disassembly = await disassembleAround(options.binaryPath, focus.start, focus.end, focus.target).catch(() => null);
+  const decompiled = [];
+  const warnings2 = [...report.warnings];
+  const auto = (options.decompile ?? "auto") === "auto";
+  const wanted = auto ? focus.fromUnwindTables && Boolean(process.env["GHIDRA_INSTALL_DIR"]) : options.decompile === true;
+  if (wanted) {
+    const base = /DYN/i.test(report.layout.imageType) ? 0x100000n : 0n;
+    const targets = [
+      { name: focus.name, start: focus.start, role: "crash" }
+    ];
+    const caller = options.decompileCaller === false ? null : nearestCaller(report, focus);
+    if (caller !== null) targets.push({ ...caller, role: "caller" });
+    for (const target of targets) {
+      const result = await decompileFunction(options.rea, options.binaryPath, target.start + base);
+      if (result.ok) {
+        decompiled.push({ ...result.value, name: target.name, address: target.start + base, role: target.role });
+        continue;
+      }
+      if (!auto || result.error.tag !== "unexpected_rea_output")
+        warnings2.push(`Decompilation unavailable: ${result.error.message} REA needs Ghidra 12.1.x (GHIDRA_INSTALL_DIR) and a JDK.`);
+      break;
+    }
+  }
+  return { ...report, disassembly, decompiled, warnings: warnings2 };
+}
+function buildReport(options, crash, layout, gdb, facts = NO_FILE_FACTS) {
   if (crash.ntFileDescriptor === null)
     return err(
       "unsupported_crash",
@@ -2096,7 +2460,9 @@ function buildReport(options, crash, layout, gdb) {
   const symbolizer = createSymbolizer(
     options.binaryPath,
     mappings.mappings,
-    layout
+    layout,
+    facts.unwindRanges,
+    facts.mappedName
   );
   const pc = register(crash, "rip");
   const sp = register(crash, "rsp");
@@ -2111,14 +2477,21 @@ function buildReport(options, crash, layout, gdb) {
   const isOwn = (frame2) => frame2.location.kind === "binary-function" || frame2.location.kind === "binary";
   const firstOwnFrame = frames[0] !== void 0 && !isOwn(frames[0]) ? frames.find(isOwn) ?? null : null;
   const instructions = gdb.status === "ok" ? gdb.instructions : [];
+  const { buildId } = facts;
   const warnings2 = [
+    ...buildId.status === "mismatch" ? [
+      `Build ID mismatch: the binary is ${buildId.binary} but the crashed process ran ${buildId.core}. Function names and offsets are likely wrong; pass the exact binary that crashed.`
+    ] : [],
     ...gdb.status === "ok" ? gdb.warnings : [],
+    ...facts.mappedName !== void 0 ? [
+      `The binary is named "${basename3(options.binaryPath)}" here but ran as "${facts.mappedName}"; matched by build ID.`
+    ] : [],
     ...symbolizer.binaryFoundInCore ? [] : [
       `No mapping named "${basename3(options.binaryPath)}" was found in the core; function names come from gdb only.`
     ]
   ];
   return ok({
-    program: basename3(options.binaryPath),
+    program: facts.mappedName ?? basename3(options.binaryPath),
     corePath: options.corePath,
     binaryPath: options.binaryPath,
     crash,
@@ -2134,11 +2507,16 @@ function buildReport(options, crash, layout, gdb) {
       instructions.find((i) => i.isFault)
     ),
     signature: signature2(classification, frames),
+    buildId,
+    focus: focusFunction(faultLocation, firstOwnFrame, facts.unwindRanges),
+    disassembly: null,
+    decompiled: [],
     gdb: gdb.status === "ok" ? { status: "ok" } : { status: gdb.status, reason: gdb.reason },
     warnings: warnings2,
     limitations: [
       "The program was not executed; all facts come from the recorded core and the binary on disk.",
-      "The binary is matched to the core by file name only. Rebuilt binaries give wrong function names; gdb warns when it detects a mismatch.",
+      buildId.status === "match" ? "The binary's GNU build ID matches the image recorded in the core." : buildId.status === "mismatch" ? "The binary's GNU build ID differs from the image recorded in the core, so this report likely describes the wrong build." : "The binary is matched to the core by file name only (no build ID in one of them, or the core did not record the binary's headers). Rebuilt binaries give wrong function names.",
+      ...frames.some((frame2) => frame2.location.kind === "binary-function" && frame2.location.symbol.origin === "eh_frame") ? ["sub_<address> names mark functions found in the binary's .eh_frame unwind tables because it has no symbol table entry for them."] : [],
       ...gdb.status === "ok" ? [
         "Backtrace frames beyond #0 come from gdb unwinding and may be incomplete without debug info or frame pointers."
       ] : [
@@ -2146,6 +2524,33 @@ function buildReport(options, crash, layout, gdb) {
       ]
     ]
   });
+}
+function nearestCaller(report, focus) {
+  const from = report.frames.findIndex(
+    (frame2) => frame2.location.kind === "binary-function" && frame2.location.symbol.value === focus.start
+  );
+  if (from === -1) return null;
+  for (const frame2 of report.frames.slice(from + 1)) {
+    if (frame2.location.kind !== "binary-function") continue;
+    if (frame2.location.symbol.value === focus.start) continue;
+    return { name: frame2.location.symbol.name, start: frame2.location.symbol.value };
+  }
+  return null;
+}
+function focusFunction(faultLocation, firstOwnFrame, unwindRanges) {
+  const pick = faultLocation?.kind === "binary-function" ? { location: faultLocation, reason: "fault", target: faultLocation.moduleOffset } : firstOwnFrame?.location.kind === "binary-function" ? { location: firstOwnFrame.location, reason: "caller", target: firstOwnFrame.location.moduleOffset } : null;
+  if (pick === null) return null;
+  const { symbol } = pick.location;
+  const unwind = unwindRanges.find((range) => range.start === symbol.value && range.end !== null);
+  const end = symbol.size > 0n ? symbol.value + symbol.size : unwind?.end ?? symbol.value + UNSIZED_FUNCTION_BYTES;
+  return {
+    name: symbol.name,
+    start: symbol.value,
+    end,
+    target: pick.target,
+    reason: pick.reason,
+    fromUnwindTables: symbol.origin === "eh_frame"
+  };
 }
 function buildFrames(gdb, pc, symbolizer) {
   if (gdb.status !== "ok" || gdb.frames.length === 0)
@@ -2227,7 +2632,7 @@ function analyzeFile(path) {
   return analyzeText(bytes.toString("utf8"), path === "-" ? "stdin" : path);
 }
 async function analyzeCore(input) {
-  const result = await triage({ corePath: input.corePath, binaryPath: input.binaryPath, rea: input.rea, gdb: input.gdb });
+  const result = await triage({ corePath: input.corePath, binaryPath: input.binaryPath, rea: input.rea, gdb: input.gdb, decompile: input.decompile ?? "auto", decompileCaller: input.decompileCaller ?? true });
   if (!result.ok) return { ok: false, message: result.error.message };
   let issue = toCoreIssue(result.value);
   if (input.logPath !== void 0) {
@@ -2247,13 +2652,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join as join2, relative } from "node:path";
 
 // src/fileKind.ts
-import { open, stat } from "node:fs/promises";
+import { open as open2, stat } from "node:fs/promises";
 var MAX_TEXT_BYTES = 8 * 1024 * 1024;
 var ET_EXEC = 2;
 var ET_DYN = 3;
 var ET_CORE = 4;
 async function detectFile(path) {
-  const handle2 = await open(path, "r");
+  const handle2 = await open2(path, "r");
   try {
     const head = Buffer.alloc(18);
     const { bytesRead } = await handle2.read(head, 0, 18, 0);
@@ -2428,7 +2833,7 @@ import { isAbsolute as isAbsolute2, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 // src/source.ts
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { readdir as readdir2, readFile as readFile2, realpath, stat as stat2 } from "node:fs/promises";
 import { basename as basename4, extname, isAbsolute, join as join3, relative as relative2, sep } from "node:path";
 var MAX_SNIPPETS = 3;
@@ -2584,7 +2989,7 @@ async function snippet(file, line) {
 }
 function blame(root, file, line) {
   return new Promise((resolve3) => {
-    execFile3(
+    execFile4(
       "git",
       ["-C", root, "blame", "--porcelain", "-L", `${line},${line}`, "--", relative2(root, file)],
       { timeout: GIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
@@ -2619,7 +3024,7 @@ function blame(root, file, line) {
 var PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 var MAX_TEXT = 4 * 1024 * 1024;
 var INSTRUCTIONS = `crashlens explains why a program failed, from what the failure left behind: a Go/Rust panic, a Python/Java/Node exception, an ASan/LSan/UBSan report, or a Linux core dump plus its binary. It never runs the program.
-Call it when a test, script or service has crashed or thrown and you have the output, a log file or a core dump. The report names the failing frame in the user's own code, the crash type with a confidence level, what to check next, and a signature that stays the same for the same bug. Pass source_dir (the repository root) to get the failing lines and git blame.`;
+Call it when a test, script or service has crashed or thrown and you have the output, a log file or a core dump. The report names the failing frame in the user's own code, the crash type with a confidence level, what to check next, and a signature that stays the same for the same bug. Pass source_dir (the repository root) to get the failing lines and git blame. For a native crash, the report shows the crashing function's code (pseudocode too for stripped binaries when Ghidra is set up); the bad value is often produced one level up, so call decompile_function on the caller frame's sub_<hex> name to see where it was set.`;
 var SOURCE_DIR = {
   type: "string",
   description: "Absolute path of the repository root. Adds the failing source lines and the last commit that touched them."
@@ -2643,16 +3048,35 @@ var TOOLS = [
   {
     name: "analyze_core_dump",
     title: "Explain a native crash from a core dump",
-    description: "Explain a Linux x86-64 core dump: signal, crash type (NULL dereference, stack overflow, abort, ...), the faulting function+offset in the binary, backtrace, faulting instruction and the register that held the bad pointer. Needs the exact binary that crashed. Uses REA (and gdb if installed) on the files only; the program is never executed.",
+    description: "Explain a Linux x86-64 core dump: signal, crash type (NULL dereference, stack overflow, abort, ...), the faulting function+offset in the binary, backtrace, the crashing function's disassembly and the register that held the bad pointer. Checks the binary against the core by build ID. Works on stripped binaries (functions named sub_<address> from unwind tables); set decompile for pseudocode. Uses REA (and gdb if installed) on the files only; the program is never executed.",
     inputSchema: {
       type: "object",
       properties: {
         core_path: { type: "string", description: "Absolute path of the core dump." },
         binary_path: { type: "string", description: "Absolute path of the binary that crashed (the same build)." },
         log_path: { type: "string", description: "Absolute path of the program's log; its last lines are added to the report." },
+        decompile: {
+          type: "boolean",
+          description: "REA + Ghidra pseudocode of the crashing function. Omit for the default: added automatically when that function has no symbol (stripped binary) and Ghidra is set up. true forces it, false skips it. For callers, use decompile_function."
+        },
         source_dir: SOURCE_DIR
       },
       required: ["core_path", "binary_path"],
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  },
+  {
+    name: "decompile_function",
+    title: "Decompile one function of a binary",
+    description: "REA + Ghidra pseudocode for one function of a native binary, by name (main), stripped name from a crashlens report (sub_11f8) or link-time address (0x11f8). Use after analyze_core_dump to read a caller and find where a bad value was produced. Static: the binary is never run. Needs Ghidra 12.1.x in GHIDRA_INSTALL_DIR; the first call on a large binary can take minutes. Output is decompiler output, not the original source.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        binary_path: { type: "string", description: "Absolute path of the binary." },
+        function: { type: "string", description: "Function name, sub_<hex> name, or 0x<hex> link-time address." }
+      },
+      required: ["binary_path", "function"],
       additionalProperties: false
     },
     annotations: { readOnlyHint: true, openWorldHint: false }
@@ -2782,9 +3206,29 @@ async function callTool(name, args, options) {
           binaryPath: path("binary_path", true),
           logPath: path("log_path", false),
           rea: options.rea,
-          gdb: options.gdb
+          gdb: options.gdb,
+          decompile: typeof args["decompile"] === "boolean" ? args["decompile"] : "auto",
+          // Keep the call short for client timeouts; callers come from decompile_function.
+          decompileCaller: false
         })
       );
+    case "decompile_function": {
+      const binary = path("binary_path", true);
+      const name2 = args["function"];
+      if (typeof name2 !== "string" || name2.trim() === "") throw new ToolError("function is required.");
+      const match = /^(?:sub_|0x)([0-9a-f]+)$/i.exec(name2.trim());
+      const target = match === null ? name2.trim() : BigInt(`0x${match[1]}`) + (await isPositionIndependent(binary) ? 0x100000n : 0n);
+      const result = await decompileFunction(options.rea, binary, target);
+      if (!result.ok) {
+        const hint = match === null ? ` If the binary is stripped it has no function named "${name2.trim()}": use the sub_<hex> name or 0x<hex> address from the backtrace.` : "";
+        throw new ToolError(`${result.error.message}${hint} Decompiling needs Ghidra 12.1.x in GHIDRA_INSTALL_DIR and a JDK.`);
+      }
+      return `Decompiled ${name2} (REA + ${result.value.provider ?? "decompiler"}: decompiler output, not the original source; Evidence ${result.value.evidenceId})
+
+\`\`\`c
+${result.value.pseudocode}
+\`\`\``;
+    }
     case "analyze_crash_folder": {
       const result = await triageBatch({
         directory: path("dir", true),
@@ -3598,6 +4042,10 @@ Options:
   -o, --output FILE  Write the report to FILE instead of stdout
   --source DIR       Your source code: show the failing lines and who last changed them
   --log FILE         Application log to show next to a core dump report (last lines)
+  --decompile        Core dumps: always add REA + Ghidra pseudocode of the crashing function.
+                     By default it is added only for stripped functions when GHIDRA_INSTALL_DIR
+                     points at Ghidra 12.1.x. Can take minutes on large binaries.
+  --no-decompile     Never decompile
   --no-gdb           Do not use gdb for core dumps (no backtrace or disassembly)
   --gdb PATH         gdb executable to use (default: gdb)
   -h, --help         Show this help
@@ -3621,6 +4069,8 @@ async function main(argv) {
         source: { type: "string" },
         port: { type: "string" },
         ai: { type: "boolean", default: false },
+        decompile: { type: "boolean" },
+        "no-decompile": { type: "boolean", default: false },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false }
@@ -3695,7 +4145,8 @@ Press Ctrl+C to stop; uploaded files are deleted on exit.
       binaryPath: absolute(binary),
       logPath: values.log,
       rea: resolveReaCommand(),
-      gdb
+      gdb,
+      decompile: values["no-decompile"] ? false : values.decompile ? true : "auto"
     });
     if (parsed2.ok) {
       const issue = await advise(await enrich(parsed2.issue));

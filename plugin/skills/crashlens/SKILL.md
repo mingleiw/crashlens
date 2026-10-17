@@ -71,8 +71,19 @@ are 3 bugs", and to confirm a fix removed exactly the bug it targeted.
 - **Getting a core:** `ulimit -c unlimited` then rerun (writes `./core` when
   `/proc/sys/kernel/core_pattern` is `core`); on systemd hosts use
   `coredumpctl list` and `coredumpctl dump <pid> -o core`.
-- The binary must be **the exact build that crashed**. A rebuilt binary gives
-  wrong function names; the report warns when gdb notices a mismatch.
+- The binary must be **the exact build that crashed**. The report checks the
+  GNU build ID against the core: on "Build ID mismatch", stop and get the right
+  binary instead of trusting the function names.
+- **Stripped binaries and no source** (the usual production case): functions are
+  named `sub_<address>` from the unwind tables, and the report shows the whole
+  crashing function's disassembly. When Ghidra 12.1.x is in `GHIDRA_INSTALL_DIR`,
+  REA + Ghidra pseudocode of that function is added automatically (force with
+  `decompile: true` / `--decompile`; it can take minutes on large binaries). Read the load
+  that produced the bad register in the disassembly or pseudocode (for example
+  `*(param_1 + 8)` is a field at offset 8 of the first argument), then follow the
+  caller: call `decompile_function` with the caller's `sub_<hex>` name from the
+  backtrace to see where that value was set (freed, left NULL, computed as 0).
+  Label pseudocode as decompiler output, not source.
 - Source file and line numbers need a build with `-g`. Without them you still get
   `function+offset`, the faulting instruction and the bad register.
 - For memory bugs, a sanitizer report is usually more precise than a core: if

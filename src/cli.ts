@@ -31,6 +31,10 @@ Options:
   -o, --output FILE  Write the report to FILE instead of stdout
   --source DIR       Your source code: show the failing lines and who last changed them
   --log FILE         Application log to show next to a core dump report (last lines)
+  --decompile        Core dumps: always add REA + Ghidra pseudocode of the crashing function.
+                     By default it is added only for stripped functions when GHIDRA_INSTALL_DIR
+                     points at Ghidra 12.1.x. Can take minutes on large binaries.
+  --no-decompile     Never decompile
   --no-gdb           Do not use gdb for core dumps (no backtrace or disassembly)
   --gdb PATH         gdb executable to use (default: gdb)
   -h, --help         Show this help
@@ -57,6 +61,8 @@ async function main(argv: readonly string[]): Promise<number> {
         source: { type: "string" },
         port: { type: "string" },
         ai: { type: "boolean", default: false },
+        decompile: { type: "boolean" },
+        "no-decompile": { type: "boolean", default: false },
         "no-gdb": { type: "boolean", default: false },
         gdb: { type: "string", default: "gdb" },
         help: { type: "boolean", short: "h", default: false },
@@ -126,6 +132,7 @@ async function main(argv: readonly string[]): Promise<number> {
       logPath: values.log,
       rea: resolveReaCommand(),
       gdb,
+      decompile: values["no-decompile"] ? false : values.decompile ? true : "auto",
     });
     if (parsed.ok) {
       const issue = await advise(await enrich(parsed.issue));

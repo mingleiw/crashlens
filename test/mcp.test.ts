@@ -57,7 +57,7 @@ describe("MCP server", () => {
     const tools = byId.get(2)?.result.tools as { name: string; annotations: { readOnlyHint: boolean } }[];
     assert.deepEqual(
       tools.map((tool) => tool.name),
-      ["analyze_failure", "analyze_core_dump", "analyze_crash_folder"],
+      ["analyze_failure", "analyze_core_dump", "decompile_function", "analyze_crash_folder"],
     );
     assert.ok(tools.every((tool) => tool.annotations.readOnlyHint));
     assert.deepEqual(byId.get(4)?.result, {});
@@ -90,6 +90,8 @@ describe("MCP server", () => {
       call(4, "analyze_core_dump", { core_path: join(work, "core") }),
       call(5, "analyze_core_dump", { core_path: join(work, "core"), binary_path: join(work, "app") }),
       call(6, "analyze_failure", { path: join(work, "missing.log") }),
+      call(7, "decompile_function", { binary_path: join(work, "app") }),
+      call(8, "decompile_function", { binary_path: join(work, "missing-app"), function: "sub_11f8" }),
     ]);
     // Calls run concurrently, so replies arrive in completion order.
     replies.sort((a, b) => Number(a.id) - Number(b.id));

@@ -71,7 +71,8 @@ crashlens --batch ./crashes ./app          # a folder of crashes, grouped into b
 
 crashlens ships as a Claude Code plugin: a skill that teaches the agent when
 to use it and how to fix the root cause, plus an MCP server with three
-read-only tools (`analyze_failure`, `analyze_core_dump`, `analyze_crash_folder`).
+read-only tools (`analyze_failure`, `analyze_core_dump`, `decompile_function`,
+`analyze_crash_folder`).
 
 ```text
 /plugin install crashlens --marketplace mingleiw/crashlens
@@ -157,9 +158,48 @@ and machines.
   last commit that touched them. Production paths like
   `/srv/releases/42/app/orders.py` are matched to `app/orders.py`; Java files
   are found by package. Only files inside that folder are read.
+- **The crashing function's code**: its disassembly around the faulting
+  instruction (or the call into a library), even in a **stripped** binary:
+  functions without symbols are named `sub_<address>` from the unwind tables
+  every binary keeps.
+- **Decompiled pseudocode** (stripped binaries, when Ghidra is set up): REA +
+  Ghidra decompile the crashing function and its caller, labeled as decompiler
+  output. See [No symbols, no source](#no-symbols-no-source).
+- **Build ID check**: the binary's GNU build ID is compared with the image the
+  crashed process actually ran, so a rebuilt binary can't silently give wrong
+  answers. A renamed or redeployed binary is still found by its build ID.
 - **Evidence**: hashes of every input and how each fact was obtained.
 - **Optional AI fix** (off by default): with `--ai`, Claude reads the report
   and suggests a fix, clearly labeled as AI-generated. See below.
+
+## No symbols, no source
+
+Production binaries are usually stripped and the source isn't on the box. crashlens
+still names every function (`sub_120a` from `.eh_frame`), shows the code around the
+fault, and, when [Ghidra](https://github.com/NationalSecurityAgency/ghidra) 12.1.x
+is installed, asks REA to decompile the crashing function and its caller:
+
+```c
+// Decompiled caller `sub_11f8` (REA + ghidra: decompiler output, not your source)
+__ptr = malloc(0x20);
+*__ptr = FUN_001011a9;
+free(__ptr);
+__s = malloc(0x20);
+memset(__s,0x41,0x20);
+FUN_001011d4(__ptr,7);        // calls through the freed pointer: use after free
+```
+
+```bash
+export GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC   # needs a JDK 21
+crashlens ./core ./app-stripped               # decompiles automatically when stripped
+crashlens ./core ./app --decompile            # always; --no-decompile never
+```
+
+Decompiling imports the whole binary into Ghidra: seconds for small programs,
+minutes for large ones. Pseudocode is the decompiler's reconstruction, not your
+source. In tests on 7 kinds of crashes with stripped binaries and no source, agents
+using crashlens found the right root cause in 6 and correctly narrowed the 7th
+(divide by zero) to the caller that passed the zero.
 
 ## Optional: ask AI for a fix
 
@@ -241,8 +281,11 @@ export REA_PWNTOOLS_PYTHON=~/.rea-pwn/bin/python
 git clone https://github.com/mingleiw/crashlens && cd crashlens
 npm install && npm run build && npm link
 
-# Optional: gdb for backtraces and disassembly
-sudo apt install gdb
+# Optional: gdb for backtraces, objdump (binutils) for the function's code
+sudo apt install gdb binutils
+
+# Optional: Ghidra 12.1.x + JDK 21 for decompiled pseudocode of stripped binaries
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1.4_PUBLIC
 ```
 
 ## Getting a core dump
@@ -275,6 +318,7 @@ crashlens --batch <dir> [binary]   [options]
 | `-o FILE` | write the report to a file |
 | `--no-gdb` | skip gdb (no backtrace or disassembly) |
 | `--gdb PATH` | use a specific gdb |
+| `--decompile` / `--no-decompile` | always / never add REA + Ghidra pseudocode (default: only for stripped functions when `GHIDRA_INSTALL_DIR` is set) |
 
 Text inputs (panics, exceptions, sanitizer reports) need nothing else installed. For core dumps: `CRASHLENS_REA` points at a specific REA (a `rea` executable or a
 `scripts/rea.mjs` checkout). `REA_PWNTOOLS_PYTHON` is required by REA.
@@ -285,8 +329,9 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 
 - **Your program is never executed.** REA only reads files, and gdb loads the
   core with script auto-loading and debuginfod (network) turned off.
-- The binary is matched to the core **by file name**. Pass the exact build that
-  crashed. If gdb detects a mismatch, the report shows a warning.
+- The binary is matched to the core **by GNU build ID** when both carry one
+  (almost every Linux toolchain emits it), otherwise by file name. On a mismatch
+  the report warns that it likely describes the wrong build.
 - Without gdb there's no backtrace, only the faulting frame.
 - Panics are read from text only. "Your code" is decided by package and crate
   names, and Rust needs `RUST_BACKTRACE=1` for a stack trace.
@@ -309,7 +354,8 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [x] Optional AI explanation and fix suggestion (off by default)
 - [x] Agent plugin: skill + MCP server (`crashlens mcp`)
 - [ ] Windows minidumps and macOS crash reports
-- [ ] Verify the binary matches the core by build ID
+- [x] Verify the binary matches the core by build ID
+- [x] Stripped binaries: names from unwind tables, function disassembly, REA + Ghidra pseudocode
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)

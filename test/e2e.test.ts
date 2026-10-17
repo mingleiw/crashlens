@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -71,6 +71,29 @@ describe(
         assert.match(markdown, /main\+0x[0-9a-f]+/);
         assert.match(markdown, /← NULL/);
         assert.match(markdown, /the program was not executed/);
+        assert.match(markdown, /\| Build ID \| matches the core/);
+
+        // Same core, stripped copy of the binary: names come from .eh_frame and
+        // the build ID still matches, because strip keeps the note.
+        mkdirSync(join(work, "stripped"));
+        execFileSync("strip", ["--strip-all", "-o", "stripped/crasher", "crasher"], { cwd: work });
+        const strippedMd = execFileSync(process.execPath, [cli, core, join(work, "stripped", "crasher")], {
+          encoding: "utf8",
+        });
+        assert.match(strippedMd, /^# Crash: NULL pointer dereference in `sub_[0-9a-f]+\+0x[0-9a-f]+`/);
+        assert.match(strippedMd, /\| Build ID \| matches the core/);
+        assert.match(strippedMd, /## Function around the fault: `sub_[0-9a-f]+`/);
+        assert.match(strippedMd, /no symbol; boundaries from \.eh_frame/);
+
+        // A rebuilt binary with different code: the build ID check must catch it.
+        mkdirSync(join(work, "rebuilt"));
+        writeFileSync(join(work, "rebuilt", "crasher.c"), SOURCE.replace("int total = 0;", "int total = 1;"));
+        execFileSync("gcc", ["-O0", "-o", "crasher", "crasher.c"], { cwd: join(work, "rebuilt") });
+        const rebuiltMd = execFileSync(process.execPath, [cli, core, join(work, "rebuilt", "crasher")], {
+          encoding: "utf8",
+        });
+        assert.match(rebuiltMd, /Build ID mismatch/);
+        assert.match(rebuiltMd, /\| Build ID \| \*\*mismatch\*\*/);
       } finally {
         rmSync(work, { recursive: true, force: true });
       }

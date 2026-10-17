@@ -3,8 +3,9 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { analyzeCore, analyzeFile, analyzeText, type Analysis } from "./analyze.js";
 import { renderBatchMarkdown, triageBatch } from "./batch.js";
+import { isPositionIndependent } from "./elf.js";
 import { renderIssueMarkdown, type Issue } from "./issue.js";
-import type { ReaCommand } from "./rea.js";
+import { decompileFunction, type ReaCommand } from "./rea.js";
 import { attachSource } from "./source.js";
 
 /**
@@ -17,7 +18,7 @@ const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05
 const MAX_TEXT = 4 * 1024 * 1024;
 
 const INSTRUCTIONS = `crashlens explains why a program failed, from what the failure left behind: a Go/Rust panic, a Python/Java/Node exception, an ASan/LSan/UBSan report, or a Linux core dump plus its binary. It never runs the program.
-Call it when a test, script or service has crashed or thrown and you have the output, a log file or a core dump. The report names the failing frame in the user's own code, the crash type with a confidence level, what to check next, and a signature that stays the same for the same bug. Pass source_dir (the repository root) to get the failing lines and git blame.`;
+Call it when a test, script or service has crashed or thrown and you have the output, a log file or a core dump. The report names the failing frame in the user's own code, the crash type with a confidence level, what to check next, and a signature that stays the same for the same bug. Pass source_dir (the repository root) to get the failing lines and git blame. For a native crash, the report shows the crashing function's code (pseudocode too for stripped binaries when Ghidra is set up); the bad value is often produced one level up, so call decompile_function on the caller frame's sub_<hex> name to see where it was set.`;
 
 const SOURCE_DIR = {
   type: "string",
@@ -45,16 +46,36 @@ const TOOLS = [
     name: "analyze_core_dump",
     title: "Explain a native crash from a core dump",
     description:
-      "Explain a Linux x86-64 core dump: signal, crash type (NULL dereference, stack overflow, abort, ...), the faulting function+offset in the binary, backtrace, faulting instruction and the register that held the bad pointer. Needs the exact binary that crashed. Uses REA (and gdb if installed) on the files only; the program is never executed.",
+      "Explain a Linux x86-64 core dump: signal, crash type (NULL dereference, stack overflow, abort, ...), the faulting function+offset in the binary, backtrace, the crashing function's disassembly and the register that held the bad pointer. Checks the binary against the core by build ID. Works on stripped binaries (functions named sub_<address> from unwind tables); set decompile for pseudocode. Uses REA (and gdb if installed) on the files only; the program is never executed.",
     inputSchema: {
       type: "object",
       properties: {
         core_path: { type: "string", description: "Absolute path of the core dump." },
         binary_path: { type: "string", description: "Absolute path of the binary that crashed (the same build)." },
         log_path: { type: "string", description: "Absolute path of the program's log; its last lines are added to the report." },
+        decompile: {
+          type: "boolean",
+          description: "REA + Ghidra pseudocode of the crashing function. Omit for the default: added automatically when that function has no symbol (stripped binary) and Ghidra is set up. true forces it, false skips it. For callers, use decompile_function.",
+        },
         source_dir: SOURCE_DIR,
       },
       required: ["core_path", "binary_path"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "decompile_function",
+    title: "Decompile one function of a binary",
+    description:
+      "REA + Ghidra pseudocode for one function of a native binary, by name (main), stripped name from a crashlens report (sub_11f8) or link-time address (0x11f8). Use after analyze_core_dump to read a caller and find where a bad value was produced. Static: the binary is never run. Needs Ghidra 12.1.x in GHIDRA_INSTALL_DIR; the first call on a large binary can take minutes. Output is decompiler output, not the original source.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        binary_path: { type: "string", description: "Absolute path of the binary." },
+        function: { type: "string", description: "Function name, sub_<hex> name, or 0x<hex> link-time address." },
+      },
+      required: ["binary_path", "function"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -211,8 +232,28 @@ async function callTool(name: string, args: Record<string, unknown>, options: Mc
           logPath: path("log_path", false),
           rea: options.rea,
           gdb: options.gdb,
+          decompile: typeof args["decompile"] === "boolean" ? args["decompile"] : "auto",
+          // Keep the call short for client timeouts; callers come from decompile_function.
+          decompileCaller: false,
         }),
       );
+    case "decompile_function": {
+      const binary = path("binary_path", true) as string;
+      const name = args["function"];
+      if (typeof name !== "string" || name.trim() === "") throw new ToolError("function is required.");
+      const match = /^(?:sub_|0x)([0-9a-f]+)$/i.exec(name.trim());
+      // Link-time addresses map to Ghidra's space: PIE images load at 0x100000.
+      const target = match === null ? name.trim() : BigInt(`0x${match[1]}`) + ((await isPositionIndependent(binary)) ? 0x100000n : 0n);
+      const result = await decompileFunction(options.rea, binary, target);
+      if (!result.ok) {
+        const hint =
+          match === null
+            ? ` If the binary is stripped it has no function named "${name.trim()}": use the sub_<hex> name or 0x<hex> address from the backtrace.`
+            : "";
+        throw new ToolError(`${result.error.message}${hint} Decompiling needs Ghidra 12.1.x in GHIDRA_INSTALL_DIR and a JDK.`);
+      }
+      return `Decompiled ${name} (REA + ${result.value.provider ?? "decompiler"}: decompiler output, not the original source; Evidence ${result.value.evidenceId})\n\n\`\`\`c\n${result.value.pseudocode}\n\`\`\``;
+    }
     case "analyze_crash_folder": {
       const result = await triageBatch({
         directory: path("dir", true) as string,
