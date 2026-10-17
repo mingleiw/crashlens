@@ -32,9 +32,10 @@ crashlens ./core ./parser > crash.md
 <img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
 </details>
 
-> **Status:** early prototype. Reads Linux x86-64 core dumps, Go/Rust panics,
-> Python tracebacks, Java and Node.js stack traces, and ASan/LSan/UBSan reports. Got a crash that stumped you? Open an issue. Real
-> crashes are the best test cases.
+> **Status:** early prototype. Reads Linux x86-64 core dumps (including stripped
+> binaries with no source), Go/Rust panics, Python tracebacks, Java and Node.js
+> stack traces, and ASan/LSan/UBSan reports. Got a crash that stumped you? Open
+> an issue. Real crashes are the best test cases.
 
 ## Use it in your browser
 
@@ -256,9 +257,11 @@ reads the program itself:
 | --- | --- | --- |
 | 1 | `rea inspect-recorded-crash` | signal, fault address, registers, mapped files |
 | 2 | `rea inspect-binary-layout` | function symbols, segments, build hardening |
-| 3 | crashlens | where the binary was loaded, so any address becomes `function+offset` |
+| 3 | crashlens | where the binary was loaded, so any address becomes `function+offset`; whether the binary's build ID matches the image that ran; function boundaries from `.eh_frame` when there are no symbols |
 | 4 | `gdb` (optional, core file only) | backtrace, inlined frames, source lines, disassembly |
-| 5 | crashlens | crash type, relevant registers, signature, Markdown report |
+| 5 | `objdump` (optional) | the crashing function's code around the fault |
+| 6 | `rea decompile` with Ghidra (optional, automatic for stripped functions) | pseudocode of the crashing function and its caller |
+| 7 | crashlens | crash type, relevant registers, signature, Markdown report |
 
 Every claim traces back to evidence. The report lists the sha256 of the core
 and binary and REA's evidence IDs, and separates what was recorded, what was
