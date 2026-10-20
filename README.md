@@ -5,6 +5,9 @@
 
 **Logs tell you where your program was. crashlens tells you why it died.**
 
+The line that crashed is where a bad value was *used*. crashlens finds where it
+was *made*, so you (or your coding agent) fix the bug instead of hiding it.
+
 **[▶ Try the live demo](https://mingleiw.github.io/crashlens/)**: paste a stack trace and see the report, right in your browser.
 
 Use it [in your browser](#use-it-in-your-browser), [from the command line](#or-from-the-command-line),
@@ -17,8 +20,9 @@ or [from your coding agent](#use-it-from-coding-agents) (Claude Code plugin + MC
 When a program crashes, the logs usually just stop. crashlens reads what the
 crash left behind (a core dump, a panic, an exception, a sanitizer report) and
 writes a bug report you can paste into an issue: where it died, why, the log
-lines right before it, and, if you point it at your repo, the failing code and
-who last changed it. It never runs your program and needs no SDK.
+lines right before it, and, if you point it at your repo, where the bad value
+came from (often a different file), what probably went wrong there, and who
+last changed it. It never runs your program and needs no SDK.
 
 ![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
 
@@ -31,6 +35,38 @@ crashlens ./core ./parser > crash.md
 <br>
 <img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
 </details>
+
+## Why: the crash line is the smoke alarm, not the fire
+
+An orders service crashes in the email code: `'NoneType' object has no
+attribute 'name'`. A comment next to the crash says the customer "can be
+missing for guest checkouts". Given only the error, Claude Code fixed it like
+this in **10 of 13 runs**:
+
+```diff
+  customer = repository.get_customer(order.customer_ref)
++ if customer is None:
++     # Guest checkout or deleted account: there is no address to send a receipt to.
++     log.warning("no customer for order %s; skipping receipt", order.id)
++     return
+```
+
+The crash is gone, and no customer ever gets a receipt again. The real bug is
+three files away: the API sends `customerId` and `models.py` reads
+`customer_id`. With the same error plus a crashlens report, which traces
+`customer` back to that lookup and says "the lookup found nothing, check the
+key before guarding the crash site", **9 of 13 runs fixed `models.py`**.
+
+| Benchmark ([bench/](#does-it-help-agents-benchmark)) | Without crashlens | With crashlens |
+| --- | --- | --- |
+| Misleading comment at the crash, bug 3 files away (13 runs) | 3/13 root-cause fixes | **9/13** |
+| Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
+| Stripped binary + core dump: turns to the root cause | 4 | **1** |
+| Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
+
+Where it made no difference: on simple bugs a strong model finds the root
+cause anyway, and the report mostly saves turns. These are small test repos,
+not a study. The harness is in the repo, so rerun it and send results.
 
 > **Status:** early prototype. Reads Linux x86-64 core dumps (including stripped
 > binaries with no source), Go/Rust panics, Python tracebacks, Java and Node.js
@@ -71,7 +107,7 @@ crashlens --batch ./crashes ./app          # a folder of crashes, grouped into b
 ## Use it from coding agents
 
 crashlens ships as a Claude Code plugin: a skill that teaches the agent when
-to use it and how to fix the root cause, plus an MCP server with three
+to use it and how to fix the root cause, plus an MCP server with four
 read-only tools (`analyze_failure`, `analyze_core_dump`, `decompile_function`,
 `analyze_crash_folder`).
 
@@ -83,9 +119,10 @@ On Claude Code older than 2.1.275, use two steps:
 `/plugin marketplace add mingleiw/crashlens`, then `/plugin install crashlens@crashlens`.
 
 Then just work as usual. When a test panics or a service throws, the agent
-passes the output to crashlens, gets the failing frame in your code, the cause
-and a stable signature, fixes the root cause, and reruns to check the signature
-is gone. The plugin bundles crashlens into one file, so it needs nothing but
+passes the output to crashlens and gets the failing frame in your code, where
+the bad value came from, the likely cause and a stable signature. The skill
+has it state that hypothesis and fix the code that produced the value, not
+add a guard at the crash site, then rerun to check the signature is gone. The plugin bundles crashlens into one file, so it needs nothing but
 Node.js. Core dumps also need REA and `REA_PWNTOOLS_PYTHON` (see
 [Install](#install)).
 
@@ -102,6 +139,45 @@ root cause, the same way crashlens does.
 
 The skill itself ([plugin/skills/crashlens/SKILL.md](plugin/skills/crashlens/SKILL.md))
 uses only portable frontmatter, so it also works as a standalone Agent Skill.
+
+## Does it help agents? (benchmark)
+
+`bench/` is an A/B test. A coding agent (Claude Code, headless) fixes each
+small crashing project twice: once with only the error output (A), once with
+the error output plus the crashlens report (B). Each diff is scored as a
+root-cause fix or a symptom guard.
+
+- **11 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+  id, a renamed field across a queue, an environment string used as a number,
+  a missing `await`, a currency code two files away, shifted CSV columns.
+- **4 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+  were written after the report's checks were frozen, with the bug two or
+  three files from the crash and, in three, a misleading comment at the crash.
+
+```bash
+npm run build
+node bench/run.mjs --cases py-customer --reps 10       # the receipt example above
+node bench/run.mjs --model haiku --reps 3              # all cases, smaller model
+node bench/run.mjs --rescore /path/to/run              # rescore saved runs
+```
+
+It runs the case programs and `claude`, which costs API usage, and writes
+every prompt, diff and a summary table to a folder. Scoring is by pattern, so
+read the diffs before quoting numbers.
+
+What we have seen so far:
+
+- **Strong model:** it finds the root cause on most cases without help. It
+  failed when a plausible comment at the crash said the value could be
+  missing (3/13 → 9/13 with the report), and the report cut turns when the
+  bug was in another file (7 → 3, 5.7 → 4).
+- **Smaller model:** without the report it guarded the crash site on the
+  case-mismatch bug every time; with it, 21/21 runs on the first 7 cases fixed
+  the root cause.
+- **Native crashes:** the decoded core and pseudocode took the agent from 4
+  turns to 1 and cut cost by about a third.
+- **Where it didn't help:** on single-file bugs the strong model was already
+  right; the report only added tokens.
 
 ## What it recognizes
 
@@ -389,26 +465,12 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [ ] Windows minidumps and macOS crash reports
 - [x] Verify the binary matches the core by build ID
 - [x] Stripped binaries: names from unwind tables, function disassembly, REA + Ghidra pseudocode
+- [x] Trace the bad value to where it was produced, with named hypotheses (Python, JavaScript)
+- [x] A/B benchmark for coding agents (`bench/`)
+- [ ] Value tracing for Java, Go and Rust; follow values through object fields and config objects
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)
-
-## Does it help agents? (benchmark)
-
-`bench/` is an A/B test: a coding agent (Claude Code, headless) fixes each
-small crashing project once with only the error output (A) and once with the
-crashlens report too (B), and the diff is scored as a root-cause fix or a
-symptom guard. Two cases put the bug one or two files away from the crash.
-
-```bash
-npm run build
-node bench/run.mjs --model haiku --reps 3              # all cases
-node bench/run.mjs --cases js-currency,py-csv          # a subset, default model
-```
-
-It runs the case programs and `claude`, which costs API usage, and writes
-every prompt, diff and a summary table to a temp folder. Scoring is by
-pattern: read the diffs before quoting numbers.
 
 ## Contributing
 
