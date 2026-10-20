@@ -1,0 +1,217 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+import { parseFailure } from "../src/failure.js";
+import { toFailureIssue } from "../src/failureIssue.js";
+import { renderIssueMarkdown } from "../src/issue.js";
+import { nativeHypotheses } from "../src/nativeHints.js";
+import { attachSource } from "../src/source.js";
+import type { TriageReport } from "../src/triage.js";
+
+const work = mkdtempSync(join(tmpdir(), "crashlens-trace-"));
+after(() => rmSync(work, { recursive: true, force: true }));
+
+function project(name: string, files: Record<string, string[]>): string {
+  const dir = join(work, name);
+  mkdirSync(dir, { recursive: true });
+  for (const [file, lines] of Object.entries(files)) writeFileSync(join(dir, file), lines.join("\n"));
+  return dir;
+}
+
+async function report(root: string, output: string): Promise<string> {
+  const parsed = parseFailure(output);
+  assert.ok(parsed.ok);
+  return renderIssueMarkdown(await attachSource(toFailureIssue(parsed.value, "err", output), root));
+}
+
+function hypotheses(markdown: string): string {
+  return /## Hypotheses to check first\n\n([\s\S]*?)\n## /.exec(markdown)?.[1] ?? "";
+}
+
+describe("value trace", () => {
+  it("names a missing await on an async producer in another file", async () => {
+    const root = project("await", {
+      "db.js": ["const rows = { 7: { name: 'Ada' } };", "", "async function getUser(id) {", "  return rows[id];", "}", "", "module.exports = { getUser };"],
+      "format.js": ["function badge(user) {", "  return user.name.toUpperCase();", "}", "module.exports = { badge };"],
+      "handler.js": ["const { getUser } = require('./db');", "const { badge } = require('./format');", "", "async function profile(req) {", "  const user = getUser(req.id);", "  return badge(user);", "}", "profile({ id: 7 });"],
+    });
+    const md = await report(root, [
+      "TypeError: Cannot read properties of undefined (reading 'toUpperCase')",
+      `    at badge (${root}/format.js:2:20)`,
+      `    at profile (${root}/handler.js:6:10)`,
+      `    at Object.<anonymous> (${root}/handler.js:8:1)`,
+      "    at Module._compile (node:internal/modules/cjs/loader:1706:14)",
+      "    at Object..js (node:internal/modules/cjs/loader:1839:10)",
+      "    at Module.load (node:internal/modules/cjs/loader:1441:32)",
+    ].join("\n"));
+    assert.match(hypotheses(md), /Missing `await`.*`getUser` is `async`.*handler\.js:5/);
+    assert.match(md, /`user` is parameter 1 of `badge`, passed as `user` at `handler\.js:6`/);
+    assert.match(md, /## Code: db\.js:3 \(getUser\)/);
+    assert.match(md, /… 2 more frames in runtime or library code/);
+    assert.doesNotMatch(md, new RegExp(`${root}/`), "paths under the source root are shortened");
+    assert.doesNotMatch(md, /Handle the missing case/);
+  });
+
+  it("flags a lookup that found nothing and a key that differs only in case", async () => {
+    const root = project("case", {
+      "server.js": [
+        'const users = [{ id: "u1", name: "Ada" }];',
+        "function findUser(id) {",
+        "  return users.find((u) => u.id === id);",
+        "}",
+        "function greeting(user) {",
+        '  return "Hello, " + user.name;',
+        "}",
+        "function handle(req) {",
+        "  const user = findUser(req.userId);",
+        "  return greeting(user);",
+        "}",
+        'handle({ userId: "U1" });',
+      ],
+    });
+    const md = await report(root, [
+      "TypeError: Cannot read properties of undefined (reading 'name')",
+      `    at greeting (${root}/server.js:6:29)`,
+      `    at handle (${root}/server.js:10:10)`,
+      `    at Object.<anonymous> (${root}/server.js:12:1)`,
+    ].join("\n"));
+    const h = hypotheses(md);
+    assert.match(h, /lookup found nothing.*`findUser`/);
+    assert.match(h, /case mismatch.*"U1".*server\.js:12.*"u1".*server\.js:1/);
+  });
+
+  it("finds the dict built with a different key name across a queue", async () => {
+    const root = project("queue", {
+      "api.py": ["def create(req):", "    job = {", '        "job_id": req["id"],', '        "customer": req["customer_id"],', '        "amount_cents": 5,', "    }", "    publish(job)"],
+      "worker.py": [
+        "def receipt(job):",
+        '    return "%s %s" % (job["customer_id"], job["amount_cents"])',
+        "",
+        "def handle(job):",
+        '    print(job["job_id"])',
+        "    print(receipt(job))",
+        "",
+        "def run():",
+        "    for job in consume():",
+        "        handle(job)",
+      ],
+    });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/worker.py", line 10, in run`,
+      "    handle(job)",
+      `  File "${root}/worker.py", line 6, in handle`,
+      "    print(receipt(job))",
+      `  File "${root}/worker.py", line 2, in receipt`,
+      '    return "%s %s" % (job["customer_id"], job["amount_cents"])',
+      "KeyError: 'customer_id'",
+    ].join("\n"));
+    assert.match(hypotheses(md), /Field name mismatch.*`api\.py:2`.*`job_id`, `amount_cents`.*no `customer_id`; it has `customer` instead/);
+    assert.match(md, /`job` is assigned at `worker\.py:9`/);
+    assert.doesNotMatch(md, /Use `\.get\(key\)` with a default, or/);
+  });
+
+  it("traces an operand type error to a setting read from the environment", async () => {
+    const root = project("config", {
+      "settings.py": ["import os", 'TIMEOUT = os.environ.get("TIMEOUT", "30")'],
+      "retry.py": ["import settings", "def deadline(start):", "    return start + settings.TIMEOUT"],
+    });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/retry.py", line 3, in deadline`,
+      "    return start + settings.TIMEOUT",
+      "TypeError: unsupported operand type(s) for +: 'float' and 'str'",
+    ].join("\n"));
+    assert.match(hypotheses(md), /`settings\.TIMEOUT` comes from the environment.*settings\.py:2.*always a string/);
+  });
+
+  it("follows a lookup key across files to the literal that does not match", async () => {
+    const root = project("currency", {
+      "config.js": ['module.exports = { currency: "eur" };'],
+      "rates.js": ['const RATES = new Map([["EUR", { value: 0.9 }]]);', "module.exports = { RATES };"],
+      "convert.js": ['const { RATES } = require("./rates");', "function convert(usd, currency) {", "  return usd * RATES.get(currency).value;", "}", "module.exports = { convert };"],
+      "cart.js": ['const settings = require("./config");', 'const { convert } = require("./convert");', "function total(usd) {", "  return convert(usd, settings.currency);", "}", "total(3);"],
+    });
+    const md = await report(root, [
+      "TypeError: Cannot read properties of undefined (reading 'value')",
+      `    at convert (${root}/convert.js:3:36)`,
+      `    at total (${root}/cart.js:4:10)`,
+      `    at Object.<anonymous> (${root}/cart.js:6:1)`,
+    ].join("\n"));
+    assert.match(md, /The lookup key is `"eur"` \(`settings\.currency`\), set at `config\.js:1`/);
+    assert.match(hypotheses(md), /case mismatch.*"eur".*config\.js:1.*"EUR".*rates\.js:1/);
+  });
+
+  it("spots columns zipped against a shifted slice, through a generator expression", async () => {
+    const root = project("csv", {
+      "loader.py": ["def load(lines):", "    header = lines[0]", "    return [dict(zip(header, v[1:])) for v in lines[1:]]"],
+      "report.py": ["def line(row):", '    return row["qty"]', "", "def summary(rows):", "    return sum(line(r) for r in rows)"],
+      "main.py": ["import loader, report", 'rows = loader.load([["sku", "qty"], ["a", 2]])', "report.summary(rows)"],
+    });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/main.py", line 3, in <module>`,
+      "    report.summary(rows)",
+      `  File "${root}/report.py", line 5, in summary`,
+      "    return sum(line(r) for r in rows)",
+      `  File "${root}/report.py", line 5, in <genexpr>`,
+      "    return sum(line(r) for r in rows)",
+      `  File "${root}/report.py", line 2, in line`,
+      '    return row["qty"]',
+      "KeyError: 'qty'",
+    ].join("\n"));
+    assert.match(md, /`rows` is assigned at `main\.py:2`/);
+    assert.match(hypotheses(md), /Columns shifted.*`zip\(header, v\[1:\]\)` at `loader\.py:3`.*`qty`/);
+    assert.doesNotMatch(md, /lookup key/);
+  });
+
+  it("adds nothing when the source gives no lead", async () => {
+    const root = project("plain", { "a.py": ["def f(x):", "    return x.name", "f(None)"] });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/a.py", line 3, in <module>`,
+      "    f(None)",
+      `  File "${root}/a.py", line 2, in f`,
+      "    return x.name",
+      "AttributeError: 'NoneType' object has no attribute 'name'",
+    ].join("\n"));
+    assert.doesNotMatch(md, /## Hypotheses/);
+    assert.match(md, /`x` is parameter 1 of `f`, passed as `None` at `a\.py:3`/);
+  });
+});
+
+describe("native hypotheses", () => {
+  const base = { relevantRegisters: [], decompiled: [] } as unknown as TriageReport;
+
+  it("recognizes a fill pattern and a use after free in the caller", () => {
+    const out = nativeHypotheses({
+      ...base,
+      relevantRegisters: [{ name: "rdx", value: 0x4141414141414141n }],
+      decompiled: [
+        {
+          name: "sub_11f8",
+          role: "caller",
+          pseudocode: ["p = malloc(0x20);", "free(p);", "q = malloc(0x20);", "memset(q,0x41,0x20);", "FUN_001011d4(p,7);"].join("\n"),
+        },
+      ],
+    } as unknown as TriageReport);
+    assert.equal(out.length, 2);
+    assert.match(out[0] ?? "", /`rdx` = `0x4141414141414141` is the byte `0x41` \('A'\) repeated/);
+    assert.match(out[1] ?? "", /caller `sub_11f8` calls `free\(p\);` and later uses `p` again: `FUN_001011d4\(p,7\);`.*`memset\(q,0x41,0x20\);`/);
+  });
+
+  it("ignores NULL, all-ones, ordinary pointers and a pointer reassigned after free", () => {
+    const out = nativeHypotheses({
+      ...base,
+      relevantRegisters: [
+        { name: "rax", value: 0n },
+        { name: "rbx", value: 0xffffffffffffffffn },
+        { name: "rcx", value: 0x55d0c0ffee10n },
+      ],
+      decompiled: [{ name: "f", role: "crash", pseudocode: "free(p);\np = malloc(8);\nuse(p);" }],
+    } as unknown as TriageReport);
+    assert.deepEqual(out, []);
+  });
+});

@@ -27,6 +27,8 @@ export interface Issue {
   /** Source locations from the stack, the program's own frames first. */
   readonly locations: readonly IssueLocation[];
   readonly cause: string;
+  /** The runtime's error line ("KeyError: 'id'"), for text failures. */
+  readonly message?: string;
   readonly nextSteps: readonly string[];
   readonly confidence: "high" | "medium" | "low";
   readonly warnings: readonly string[];

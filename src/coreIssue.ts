@@ -1,4 +1,5 @@
 import type { Issue, IssueSection } from "./issue.js";
+import { nativeHypotheses } from "./nativeHints.js";
 import { formatLocation, hex } from "./symbolize.js";
 import type { TriageFrame, TriageReport } from "./triage.js";
 
@@ -8,6 +9,9 @@ export function toCoreIssue(report: TriageReport): Issue {
   const where = report.firstOwnFrame ?? report.frames[0] ?? null;
   const whereName = where === null ? null : frameName(where);
   const sections: IssueSection[] = [];
+  const hypotheses = nativeHypotheses(report);
+  if (hypotheses.length > 0)
+    sections.push({ heading: "Hypotheses to check first", kind: "list", items: hypotheses });
   if (report.frames.length > 0)
     sections.push({
       heading: "Backtrace",
@@ -111,7 +115,10 @@ export function toCoreIssue(report: TriageReport): Issue {
       return [{ file: match[1] as string, line: Number(match[2]), function: frameName(frame), own }];
     }).sort((a, b) => Number(b.own) - Number(a.own)),
     cause: classification.explanation,
-    nextSteps: classification.nextSteps,
+    nextSteps:
+      hypotheses.length > 0
+        ? ["Check the hypotheses at the top of this report before changing the crashing function.", ...classification.nextSteps]
+        : classification.nextSteps,
     confidence: classification.confidence,
     warnings: report.warnings,
     evidence: [

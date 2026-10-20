@@ -18,8 +18,8 @@ export interface FailureRule {
 }
 
 const NIL_STEPS = [
-  "Find where the value used on the failing line is created, and why it can be nil/None.",
-  "Handle the missing case explicitly (return an error, use a default) instead of assuming it exists.",
+  "Find where the value used on the failing line was produced (assigned, returned or passed in), and why it is empty there.",
+  "Fix it where it is produced. A check at the failing line only hides the bug, unless an empty value is genuinely valid there.",
 ];
 
 /** First matching rule wins; order from most to least specific. */
@@ -41,7 +41,7 @@ const RULES: readonly FailureRule[] = [
     explain: (m) => `The code read index ${m[1]} of a slice or array that only has ${m[2]} element${m[2] === "1" ? "" : "s"}.`,
     nextSteps: [
       "Check where the index comes from and whether the slice can be shorter than expected (empty input, off-by-one).",
-      "Guard the access with a length check, or validate the input earlier.",
+      "Fix where the index or the slice is computed; add a length check only if a shorter slice is a valid case.",
     ],
   },
   {
@@ -66,7 +66,7 @@ const RULES: readonly FailureRule[] = [
     kind: "go-divide-by-zero",
     title: "Integer divide by zero",
     explain: () => "An integer division or modulo used a zero divisor.",
-    nextSteps: ["Check the divisor for zero before dividing, or validate the input that produces it."],
+    nextSteps: ["Find where the divisor comes from and why it can be zero; fix or validate it there."],
   },
   {
     language: "go",
@@ -74,7 +74,7 @@ const RULES: readonly FailureRule[] = [
     kind: "go-type-assertion",
     title: "Failed type assertion",
     explain: (m) => `A type assertion failed: ${m[1]}.`,
-    nextSteps: ["Use the two-value form `v, ok := x.(T)` and handle `!ok`, or a type switch."],
+    nextSteps: ["Find where the value was stored with a different type; use `v, ok := x.(T)` only if several types are expected."],
   },
   {
     language: "go",
@@ -170,7 +170,7 @@ const RULES: readonly FailureRule[] = [
     kind: "rust-divide-by-zero",
     title: "Divide by zero",
     explain: () => "An integer division or remainder used a zero divisor.",
-    nextSteps: ["Check the divisor for zero (or use `checked_div`) before dividing."],
+    nextSteps: ["Find where the divisor comes from and why it can be zero; use `checked_div` only if zero is a valid input."],
   },
   {
     language: "rust",
@@ -203,13 +203,13 @@ const RULES: readonly FailureRule[] = [
     NIL_STEPS),
   rule("python", /^KeyError: (.*)/, "python-key-error", "Missing dictionary key",
     (m) => `The code looked up key ${m[1]} in a dict that doesn't contain it.`,
-    ["Check where the dict is built and whether this key is optional.", "Use `.get(key)` with a default, or validate the input that should contain it."]),
+    ["Find the code that builds this dict (it may be in another module or service) and compare its keys with the one read here.", "Fix the name on whichever side is wrong. Use `.get(key)` with a default only if the key is genuinely optional."]),
   rule("python", /^IndexError: (.*)/, "python-index-error", "Index out of range",
     (m) => `A list or sequence was indexed past its end (${m[1]}).`,
     ["Check the index against `len(...)` and whether the sequence can be empty."]),
   rule("python", /^ZeroDivisionError/, "python-zero-division", "Division by zero",
     () => "A division or modulo used zero as the divisor.",
-    ["Check the divisor before dividing, or validate the input that produces it."]),
+    ["Find where the divisor comes from and why it can be zero; fix or validate it there."]),
   rule("python", /^RecursionError/, "python-recursion", "Infinite recursion",
     () => "A function kept calling itself until Python's recursion limit was hit.",
     ["Find the repeating frame in the stack trace and check its base case."]),
@@ -253,7 +253,7 @@ const RULES: readonly FailureRule[] = [
     ["Use `Iterator.remove()` or `removeIf`, collect changes and apply them after the loop, or use a concurrent collection."]),
   rule("java", /ArithmeticException: \/ by zero/, "java-divide-by-zero", "Division by zero",
     () => "An integer division used zero as the divisor.",
-    ["Check the divisor before dividing."]),
+    ["Find where the divisor comes from and why it can be zero; fix or validate it there."]),
   rule("java", /StackOverflowError/, "java-stack-overflow", "Stack overflow",
     () => "A method kept calling itself (directly or indirectly) until the thread's stack ran out.",
     ["Find the repeating frames in the stack trace and check the recursion's base case."]),
@@ -262,7 +262,7 @@ const RULES: readonly FailureRule[] = [
     ["Check for unbounded caches or collections; capture a heap dump with -XX:+HeapDumpOnOutOfMemoryError."]),
   rule("java", /NoSuchElementException(?:: (.*))?$/, "java-no-such-element", "Missing element",
     (m) => `An empty Optional, iterator or collection was asked for a value${m[1] ? ` (${m[1]})` : ""}.`,
-    ["Check `isPresent()`/`hasNext()`, or use `orElse`/`orElseThrow` with a clear message."]),
+    ["Find why the Optional, iterator or collection is empty here; if empty is a valid case, handle it with `orElse`/`orElseThrow` and a clear message."]),
   rule("java", /UnsupportedOperationException/, "java-unsupported-operation", "Unsupported operation",
     () => "An operation was called that the object doesn't support, most often modifying an immutable collection (`List.of`, `Collections.unmodifiable…`).",
     ["Copy into a mutable collection (`new ArrayList<>(...)`) before modifying it."]),

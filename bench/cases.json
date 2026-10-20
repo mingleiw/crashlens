@@ -1,0 +1,57 @@
+{
+  "_comment": "Each case crashes with `run`. A fix is scored from the diff's added lines: `root` when a root pattern matches in the named file, `symptom` when only a symptom pattern matches. Patterns are heuristics; read the diffs before quoting results.",
+  "cases": {
+    "py-none": {
+      "run": ["python3", "shop.py", "1003"],
+      "bug": "An unknown order id: load_order returns None for it, and total() reads it.",
+      "root": [{ "file": "shop.py", "pattern": "raise|sys\\.exit|not found|unknown order|KeyError|ORDERS\\[" }],
+      "symptom": "if (not )?order( is None)?:|order or \\{|\\.get\\(\"items\""
+    },
+    "js-case": {
+      "run": ["node", "server.js"],
+      "bug": "The request id is \"U1\", stored ids are lowercase.",
+      "root": [{ "file": "server.js", "pattern": "toLowerCase|toUpperCase\\(\\) ?===|\"u1\"|localeCompare" }],
+      "symptom": "if \\(!user\\)|user\\?\\.|user && "
+    },
+    "py-queue": {
+      "run": ["python3", "main.py"],
+      "bug": "The producer writes \"customer\"; the worker reads \"customer_id\".",
+      "root": [
+        { "file": "api.py", "pattern": "\"customer_id\":" },
+        { "file": "worker.py", "pattern": "job\\[\"customer\"\\]" }
+      ],
+      "symptom": "\\.get\\(\"customer_id\"|not in job|except KeyError"
+    },
+    "py-config": {
+      "run": ["python3", "app.py"],
+      "bug": "RETRY_TIMEOUT comes from the environment as a string.",
+      "root": [
+        { "file": "settings.py", "pattern": "int\\(|float\\(" },
+        { "file": "retry.py", "pattern": "int\\(|float\\(" }
+      ],
+      "symptom": "isinstance|except TypeError"
+    },
+    "js-await": {
+      "run": ["node", "handler.js"],
+      "bug": "getUser is async and is called without await.",
+      "root": [{ "file": "handler.js", "pattern": "await getUser" }],
+      "symptom": "if \\(!user|user\\?\\.|throw new Error"
+    },
+    "js-currency": {
+      "run": ["node", "cart.js"],
+      "bug": "config.js sets currency \"eur\"; the rate table is keyed \"EUR\". Two files away from the crash.",
+      "root": [
+        { "file": "config.js", "pattern": "\"EUR\"" },
+        { "file": "convert.js", "pattern": "toUpperCase" },
+        { "file": "cart.js", "pattern": "toUpperCase" }
+      ],
+      "symptom": "if \\(!rate|\\?\\.value|\\|\\| ?1\\b|\\?\\? ?1\\b"
+    },
+    "py-csv": {
+      "run": ["python3", "main.py"],
+      "bug": "loader.py zips the full header with values[1:], shifting every column. One file away from the crash.",
+      "root": [{ "file": "loader.py", "pattern": "zip\\(header, ?values\\)" }],
+      "symptom": "\\.get\\(\"qty\"|\"qty\" in row|except KeyError"
+    }
+  }
+}

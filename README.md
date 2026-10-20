@@ -152,6 +152,18 @@ and machines.
   (your frames marked) and, for core dumps, the faulting instruction and the
   register that was NULL.
 - **Why**: the crash type in plain language and what to check next.
+- **Where the bad value came from** (with `--source DIR`): the crash line is
+  where a bad value was *used*. crashlens follows it back through assignments
+  and call arguments, across files and frames, to where it was *produced*, and
+  shows that function. It then checks for causes it can name: a missing
+  `await` on an `async` function, a lookup whose key differs only in case
+  from the stored one (followed back to the literal, even in a config file), a
+  field the producer spells differently from the consumer, columns zipped
+  against a shifted slice, or an environment value used as a number. These
+  come first in the report, labeled as hypotheses from a static reading.
+- **Native hypotheses**: a register holding a fill pattern (`0x4141…`) rather
+  than a pointer, and a use after free visible in the decompiled caller
+  (`free(p)` followed by a use of `p`), with the `memset` that overwrote it.
 - **What it was doing**: the log lines printed just before the failure (or
   your app log via `--log app.log` for core dumps), so you can see which
   request, order or user triggered it.
@@ -380,6 +392,23 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)
+
+## Does it help agents? (benchmark)
+
+`bench/` is an A/B test: a coding agent (Claude Code, headless) fixes each
+small crashing project once with only the error output (A) and once with the
+crashlens report too (B), and the diff is scored as a root-cause fix or a
+symptom guard. Two cases put the bug one or two files away from the crash.
+
+```bash
+npm run build
+node bench/run.mjs --model haiku --reps 3              # all cases
+node bench/run.mjs --cases js-currency,py-csv          # a subset, default model
+```
+
+It runs the case programs and `claude`, which costs API usage, and writes
+every prompt, diff and a summary table to a temp folder. Scoring is by
+pattern: read the diffs before quoting numbers.
 
 ## Contributing
 

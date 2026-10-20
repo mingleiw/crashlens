@@ -46,14 +46,21 @@ are already the model reading the report.
    before the trace: they show which request or input triggered it. For Rust,
    set `RUST_BACKTRACE=1` first, or there is no stack.
 2. **Analyze** with the right tool above.
-3. **Read the report in this order:** the title (crash type and where), the
-   "your code" frame, the likely cause and its confidence, the failing lines
-   and blame, and the log context. Low confidence means verify before acting.
-4. **Fix the root cause, not the line that blew up.** The crash site is where
-   a bad value was *used*. Trace back to where it was *produced* (where the
-   `None`/`nil`/NULL came from, why the index was out of range, who freed the
-   memory, per the sanitizer's "freed by" stack) and fix it there. The report's
-   next steps say what to check.
+3. **Read the report in this order:** "Hypotheses to check first" and "Where
+   the bad value came from" when present (with `source_dir`), then the title
+   (crash type and where), the "your code" frame, the likely cause and its
+   confidence, the failing lines and blame, and the log context. Low
+   confidence means verify before acting.
+4. **State the hypothesis, then fix the root cause, not the line that blew
+   up.** Before editing, say in one sentence where the bad value was
+   *produced* and why, and check it against the code. The crash site is where
+   it was *used*. The report's hypotheses (a missing `await`, a lookup key
+   that differs in case, a field name the producer spells differently, an
+   environment string used as a number, a use after free) are static guesses
+   from the source or the core: confirm one in the code, then fix it where the
+   value is produced. Do not add a `None`/`undefined`/NULL check, a default or
+   a `try`/`except` at the crash site unless a missing value is genuinely
+   valid there; a guard hides the bug and the next caller hits it.
 5. **Verify.** Rerun the same command. The failure, and its signature, should be
    gone. If a different signature appears, it is a new bug: repeat.
 

@@ -92,6 +92,7 @@ export function toFailureIssue(failure: ParsedFailure, input: string, text: stri
     sections,
     locations: locations(failure),
     cause: classification.explanation,
+    message: failure.errorType === null ? failure.message : `${failure.errorType}: ${failure.message}`,
     nextSteps: classification.nextSteps,
     confidence: classification.confidence,
     warnings: warnings(failure, own.length),
@@ -145,8 +146,16 @@ function warnings(failure: ParsedFailure, ownFrames: number): string[] {
   return list;
 }
 
+/** Runtime frames after the last own frame beyond this many are summarized in one line. */
+const TRAILING_FRAMES = 1;
+
 function stackLines(frames: readonly FailureFrame[]): string[] {
-  return frames.flatMap((f, index) => {
+  const lastOwn = frames.findLastIndex((f) => f.own && !f.createdBy);
+  const keep = lastOwn === -1 ? frames.length : lastOwn + 1 + TRAILING_FRAMES;
+  // Go's "created by" frame says where the goroutine started: always shown.
+  const hidden = frames.filter((f, index) => index >= keep && !f.createdBy).length;
+  const shown = hidden <= 1 ? frames.map((f, index) => [f, index] as const) : frames.flatMap((f, index) => (index < keep || f.createdBy ? [[f, index] as const] : []));
+  const lines = shown.flatMap(([f, index]) => {
     const marker = f.own && !f.createdBy ? "→" : " ";
     const name = f.createdBy ? `created by ${f.function}` : f.function;
     const at =
@@ -154,6 +163,7 @@ function stackLines(frames: readonly FailureFrame[]): string[] {
     const line = `${marker} #${index} ${name}${at}`;
     return f.code === null ? [line] : [line, `       ${f.code}`];
   });
+  return hidden <= 1 ? lines : [...lines, `  … ${hidden} more frames in runtime or library code`];
 }
 
 /** Last lines before the failure output: what the program logged just before it died. */

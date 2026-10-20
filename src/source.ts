@@ -2,9 +2,12 @@ import { execFile } from "node:child_process";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, sep } from "node:path";
 import type { Issue, IssueLocation, IssueSection } from "./issue.js";
+import { traceValue, type TraceFrame } from "./trace.js";
 
 /** How many distinct locations get a code snippet. */
 const MAX_SNIPPETS = 3;
+/** How many own frames the value trace may walk through. */
+const MAX_TRACE_FRAMES = 8;
 const CONTEXT_LINES = 3;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** Bounds for the basename search fallback. */
@@ -49,10 +52,14 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
 
   const seen = new Set<string>();
   const snippets: SourceSnippet[] = [];
+  const traceFrames: TraceFrame[] = [];
   for (const location of issue.locations.filter((l) => l.own)) {
-    if (snippets.length >= MAX_SNIPPETS) break;
+    if (snippets.length >= MAX_SNIPPETS && traceFrames.length >= MAX_TRACE_FRAMES) break;
     const file = await resolveFile(realRoot, location, lookup);
     if (file === null) continue;
+    if (traceFrames.length < MAX_TRACE_FRAMES)
+      traceFrames.push({ file, line: location.line, function: location.function });
+    if (snippets.length >= MAX_SNIPPETS) continue;
     const key = `${file}:${location.line}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -75,7 +82,15 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
     lines: s.lines,
   }));
   const blamed = snippets.filter((s) => s.blame !== null);
-  if (blamed.length > 0)
+  const commits = new Set(blamed.map((s) => (s.blame as Blame).commit));
+  if (blamed.length > 1 && commits.size === 1 && !commits.has("uncommitted")) {
+    const b = blamed[0]?.blame as Blame;
+    sections.push({
+      heading: "Last change to these lines",
+      kind: "list",
+      items: [`All ${blamed.length} lines: ${b.author}, ${b.date}, \`${b.commit}\` "${b.summary}"`],
+    });
+  } else if (blamed.length > 0)
     sections.push({
       heading: "Last change to these lines",
       kind: "list",
@@ -90,10 +105,41 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
   const at = issue.sections.findIndex((s) => s.heading === "Stack trace" || s.heading === "Backtrace");
   const merged = [...issue.sections];
   merged.splice(at === -1 ? 0 : at + 1, 0, ...sections);
+
+  // Where the bad value came from, and what that suggests, go first.
+  const trace =
+    issue.message === undefined
+      ? null
+      : await traceValue(issue.kind, issue.message, traceFrames, realRoot, async () => {
+          index ??= await indexByBasename(realRoot);
+          return [...index.values()].flat();
+        });
+  const first: IssueSection[] = [];
+  if (trace !== null) {
+    if (trace.hypotheses.length > 0)
+      first.push({ heading: "Hypotheses to check first", kind: "list", items: trace.hypotheses });
+    if (trace.steps.length > 0)
+      first.push({ heading: "Where the bad value came from", kind: "list", items: trace.steps });
+    for (const c of trace.code) first.push({ heading: c.heading, kind: "code", language: c.language, lines: c.lines });
+  }
+  const prefixes = [`${realRoot}${sep}`, ...(isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep}`] : [])];
+  const shorten = (text: string) => prefixes.reduce((t, p) => t.replaceAll(p, ""), text);
   return {
     ...issue,
-    sections: merged,
-    evidence: [...issue.evidence, `Source: ${snippets.length} location${snippets.length === 1 ? "" : "s"} read from \`${root}\``],
+    summary: shorten(issue.summary),
+    facts: issue.facts.map((f) => ({ ...f, value: shorten(f.value) })),
+    sections: [...first, ...merged].map((s) =>
+      s.kind === "code" ? { ...s, lines: s.lines.map(shorten) } : s.kind === "list" ? { ...s, items: s.items.map(shorten) } : s,
+    ),
+    nextSteps:
+      trace !== null && trace.hypotheses.length > 0
+        ? ["Check the hypotheses at the top of this report before changing the failing line.", ...issue.nextSteps]
+        : issue.nextSteps,
+    evidence: [
+      ...issue.evidence,
+      `Source: ${snippets.length} location${snippets.length === 1 ? "" : "s"} read from \`${root}\``,
+      ...(trace === null ? [] : ["Value trace and hypotheses: static reading of the source, not execution; verify before acting."]),
+    ],
   };
 }
 
