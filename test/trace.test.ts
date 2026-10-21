@@ -47,7 +47,7 @@ describe("value trace", () => {
       "    at Module.load (node:internal/modules/cjs/loader:1441:32)",
     ].join("\n"));
     assert.match(hypotheses(md), /Missing `await`.*`getUser` is `async`.*handler\.js:5/);
-    assert.match(md, /`user` is parameter 1 of `badge`, passed as `user` at `handler\.js:6`/);
+    assert.match(md, /`user` is a parameter of `badge`, passed as `user` at `handler\.js:6`/);
     assert.match(md, /## Code: db\.js:3 \(getUser\)/);
     assert.match(md, /… 2 more frames in runtime or library code/);
     assert.doesNotMatch(md, new RegExp(`${root}/`), "paths under the source root are shortened");
@@ -109,7 +109,7 @@ describe("value trace", () => {
       "KeyError: 'customer_id'",
     ].join("\n"));
     assert.match(hypotheses(md), /Field name mismatch.*`api\.py:2`.*`job_id`, `amount_cents`.*no `customer_id`; it has `customer` instead/);
-    assert.match(md, /`job` is assigned at `worker\.py:9`/);
+    assert.match(md, /`job` is an element of `consume\(\)` \(`worker\.py:9`\)/);
     assert.doesNotMatch(md, /Use `\.get\(key\)` with a default, or/);
   });
 
@@ -178,7 +178,7 @@ describe("value trace", () => {
       "AttributeError: 'NoneType' object has no attribute 'name'",
     ].join("\n"));
     assert.doesNotMatch(md, /## Hypotheses/);
-    assert.match(md, /`x` is parameter 1 of `f`, passed as `None` at `a\.py:3`/);
+    assert.match(md, /`x` is a parameter of `f`, passed as `None` at `a\.py:3`/);
   });
 });
 

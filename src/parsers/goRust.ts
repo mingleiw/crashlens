@@ -3,8 +3,10 @@ import { failure, frame, type FailureFrame, type ParsedFailure } from "../failur
 // ---------------------------------------------------------------- Go
 
 const GO_HEADER = /^(panic|fatal error): (.*)$/m;
-const GO_GOROUTINE = /^goroutine (\d+) \[([^\]]+)\]:$/;
-const GO_FILE_LINE = /^\t(.+?):(\d+)(?: \+0x[0-9a-f]+)?$/;
+/** `goroutine 1 [running]:`, or with GOTRACEBACK=system: `goroutine 1 gp=0x… m=0 mp=0x… [running]:` */
+const GO_GOROUTINE = /^goroutine (\d+)(?: [^[\]\n]*)? \[([^\]]+)\]:$/;
+/** `\tfile.go:12 +0x1d`, plus ` fp=… sp=… pc=…` with GOTRACEBACK=system */
+const GO_FILE_LINE = /^\t(.+?):(\d+)(?: \+0x[0-9a-f]+)?(?: [^\n]*)?$/;
 
 export function parseGo(text: string): ParsedFailure | null {
   const header = GO_HEADER.exec(text);
@@ -67,6 +69,8 @@ export function parseGo(text: string): ParsedFailure | null {
  */
 function isOwnGoFrame(fn: string, file: string | null): boolean {
   if (file !== null && /\/go[\d.]*\/src\//.test(file)) return false;
+  // Dependencies: the module cache and vendored copies.
+  if (file !== null && /\/pkg\/mod\/|\/vendor\//.test(file)) return false;
   const lastSlash = fn.lastIndexOf("/");
   const pkg =
     fn.slice(0, lastSlash + 1) + fn.slice(lastSlash + 1).split(".")[0];
@@ -81,7 +85,7 @@ const RUST_HEADER =
   /^thread '([^']*)'(?: \(\d+\))? panicked at (.+?):(\d+):(\d+):$/m;
 /** Rust < 1.73: `thread 'main' panicked at 'message', src/main.rs:5:20` */
 const RUST_LEGACY_HEADER =
-  /^thread '([^']*)' panicked at '([\s\S]*?)', (.+?):(\d+):(\d+)$/m;
+  /^thread '([^'\n]*)' panicked at '([^\n]*?)', ([^\n]+?):(\d+):(\d+)$/m;
 const RUST_FRAME = /^\s*\d+:\s+(?:0x[0-9a-f]+ - )?(.+)$/;
 const RUST_AT = /^\s+at (.+?):(\d+)(?::(\d+))?$/;
 

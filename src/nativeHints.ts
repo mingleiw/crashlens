@@ -52,11 +52,19 @@ function useAfterFree(pseudocode: string): { free: string; pointer: string; use:
     if (freed === null) continue;
     const pointer = freed[1] as string;
     const word = new RegExp(`\\b${pointer}\\b`);
+    // The block that frees may leave before any later use: `if (err) { free(p); return -1; }`.
+    const exits = /\b(?:return|goto|break|continue|exit|abort|longjmp)\b/;
+    const after = (lines[i] as string).slice((freed.index ?? 0) + freed[0].length);
+    const beforeClose = after.split("}")[0] ?? "";
+    if (exits.test(beforeClose)) continue;
+    let depth = after.includes("}") ? -1 : 0;
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j] as string;
       if (new RegExp(`^${pointer}\\s*=[^=]`).test(line)) break;
-      if (word.test(line))
-        return { free: lines[i] as string, pointer, use: line, between: lines.slice(i + 1, j) };
+      if (word.test(line)) return { free: lines[i] as string, pointer, use: line, between: lines.slice(i + 1, j) };
+      // Still inside the block that freed, and it leaves: this path never reaches a later use.
+      if (depth >= 0 && exits.test(line.split("}")[0] ?? "")) break;
+      for (const ch of line) depth += ch === "{" ? 1 : ch === "}" ? -1 : 0;
     }
   }
   return null;

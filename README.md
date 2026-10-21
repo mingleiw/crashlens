@@ -41,7 +41,7 @@ crashlens ./core ./parser > crash.md
 An orders service crashes in the email code: `'NoneType' object has no
 attribute 'name'`. A comment next to the crash says the customer "can be
 missing for guest checkouts". Given only the error, Claude Code fixed it like
-this in **10 of 13 runs**:
+this in **12 of 18 runs**:
 
 ```diff
   customer = repository.get_customer(order.customer_ref)
@@ -55,11 +55,11 @@ The crash is gone, and no customer ever gets a receipt again. The real bug is
 three files away: the API sends `customerId` and `models.py` reads
 `customer_id`. With the same error plus a crashlens report, which traces
 `customer` back to that lookup and says "the lookup found nothing, check the
-key before guarding the crash site", **9 of 13 runs fixed `models.py`**.
+key before guarding the crash site", **13 of 18 runs fixed `models.py`**.
 
 | Benchmark ([bench/](#does-it-help-agents-benchmark)) | Without crashlens | With crashlens |
 | --- | --- | --- |
-| Misleading comment at the crash, bug 3 files away (13 runs) | 3/13 root-cause fixes | **9/13** |
+| Misleading comment at the crash, bug 3 files away (18 runs) | 6/18 root-cause fixes | **13/18** |
 | Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
 | Stripped binary + core dump: turns to the root cause | 4 | **1** |
 | Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
@@ -169,7 +169,7 @@ What we have seen so far:
 
 - **Strong model:** it finds the root cause on most cases without help. It
   failed when a plausible comment at the crash said the value could be
-  missing (3/13 → 9/13 with the report), and the report cut turns when the
+  missing (6/18 → 13/18 with the report), and the report cut turns when the
   bug was in another file (7 → 3, 5.7 → 4).
 - **Smaller model:** without the report it guarded the crash site on the
   case-mismatch bug every time; with it, 21/21 runs on the first 7 cases fixed

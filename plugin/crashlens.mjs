@@ -7,13 +7,40 @@ import { isAbsolute as isAbsolute4, resolve as resolve2 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/analyze.ts
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
+
+// src/fileKind.ts
+import { open, stat } from "node:fs/promises";
+var MAX_TEXT_BYTES = 8 * 1024 * 1024;
+var ET_EXEC = 2;
+var ET_DYN = 3;
+var ET_CORE = 4;
+async function detectFile(path) {
+  const handle2 = await open(path, "r");
+  try {
+    const head = Buffer.alloc(18);
+    const { bytesRead } = await handle2.read(head, 0, 18, 0);
+    if (bytesRead >= 18 && head.readUInt32BE(0) === 2135247942) {
+      const type = head.readUInt16LE(16);
+      if (type === ET_CORE) return { kind: "core" };
+      if (type === ET_EXEC || type === ET_DYN) return { kind: "binary" };
+      return { kind: "other", reason: "ELF file that is neither a core dump nor an executable" };
+    }
+    if ((await stat(path)).size > MAX_TEXT_BYTES)
+      return { kind: "other", reason: "larger than 8 MiB and not a core dump" };
+    if (head.subarray(0, bytesRead).includes(0))
+      return { kind: "other", reason: "binary file that is not a core dump" };
+    return { kind: "text" };
+  } finally {
+    await handle2.close();
+  }
+}
 
 // src/symbolize.ts
 import { basename } from "node:path";
 
 // src/elf.ts
-import { open } from "node:fs/promises";
+import { open as open2 } from "node:fs/promises";
 var PT_LOAD = 1;
 var PT_NOTE = 4;
 var PT_GNU_EH_FRAME = 1685382480;
@@ -65,7 +92,7 @@ function buildIdFromNotes(notes) {
   return null;
 }
 async function isPositionIndependent(path) {
-  const file = await open(path, "r");
+  const file = await open2(path, "r");
   try {
     return (await readHeaders(file))?.type === 3;
   } finally {
@@ -73,7 +100,7 @@ async function isPositionIndependent(path) {
   }
 }
 async function binaryBuildId(path) {
-  const file = await open(path, "r");
+  const file = await open2(path, "r");
   try {
     const headers = await readHeaders(file);
     if (headers === null) return null;
@@ -94,7 +121,7 @@ async function readCoreMemory(file, loads, address, length) {
   return bytes.length === length ? bytes : null;
 }
 async function coreImageBuildId(corePath, imageBase) {
-  const file = await open(corePath, "r");
+  const file = await open2(corePath, "r");
   try {
     const headers = await readHeaders(file);
     if (headers === null || headers.type !== 4) return null;
@@ -163,7 +190,7 @@ function readEncoded(buf, pos, encoding, fieldAddress, dataRel) {
   return { value: BigInt.asUintN(64, value), size };
 }
 async function functionRanges(path) {
-  const file = await open(path, "r");
+  const file = await open2(path, "r");
   try {
     const headers = await readHeaders(file);
     if (headers === null) return [];
@@ -338,11 +365,17 @@ function useAfterFree(pseudocode) {
     if (freed === null) continue;
     const pointer = freed[1];
     const word = new RegExp(`\\b${pointer}\\b`);
+    const exits = /\b(?:return|goto|break|continue|exit|abort|longjmp)\b/;
+    const after = lines[i].slice((freed.index ?? 0) + freed[0].length);
+    const beforeClose = after.split("}")[0] ?? "";
+    if (exits.test(beforeClose)) continue;
+    let depth = after.includes("}") ? -1 : 0;
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j];
       if (new RegExp(`^${pointer}\\s*=[^=]`).test(line)) break;
-      if (word.test(line))
-        return { free: lines[i], pointer, use: line, between: lines.slice(i + 1, j) };
+      if (word.test(line)) return { free: lines[i], pointer, use: line, between: lines.slice(i + 1, j) };
+      if (depth >= 0 && exits.test(line.split("}")[0] ?? "")) break;
+      for (const ch of line) depth += ch === "{" ? 1 : ch === "}" ? -1 : 0;
     }
   }
   return null;
@@ -508,8 +541,8 @@ function coreDetails(report) {
 
 // src/parsers/goRust.ts
 var GO_HEADER = /^(panic|fatal error): (.*)$/m;
-var GO_GOROUTINE = /^goroutine (\d+) \[([^\]]+)\]:$/;
-var GO_FILE_LINE = /^\t(.+?):(\d+)(?: \+0x[0-9a-f]+)?$/;
+var GO_GOROUTINE = /^goroutine (\d+)(?: [^[\]\n]*)? \[([^\]]+)\]:$/;
+var GO_FILE_LINE = /^\t(.+?):(\d+)(?: \+0x[0-9a-f]+)?(?: [^\n]*)?$/;
 function parseGo(text) {
   const header = GO_HEADER.exec(text);
   if (header === null) return null;
@@ -559,13 +592,14 @@ function parseGo(text) {
 }
 function isOwnGoFrame(fn, file) {
   if (file !== null && /\/go[\d.]*\/src\//.test(file)) return false;
+  if (file !== null && /\/pkg\/mod\/|\/vendor\//.test(file)) return false;
   const lastSlash = fn.lastIndexOf("/");
   const pkg = fn.slice(0, lastSlash + 1) + fn.slice(lastSlash + 1).split(".")[0];
   if (pkg === "main") return true;
   return (pkg.split("/")[0] ?? "").includes(".");
 }
 var RUST_HEADER = /^thread '([^']*)'(?: \(\d+\))? panicked at (.+?):(\d+):(\d+):$/m;
-var RUST_LEGACY_HEADER = /^thread '([^']*)' panicked at '([\s\S]*?)', (.+?):(\d+):(\d+)$/m;
+var RUST_LEGACY_HEADER = /^thread '([^'\n]*)' panicked at '([^\n]*?)', ([^\n]+?):(\d+):(\d+)$/m;
 var RUST_FRAME = /^\s*\d+:\s+(?:0x[0-9a-f]+ - )?(.+)$/;
 var RUST_AT = /^\s+at (.+?):(\d+)(?::(\d+))?$/;
 function parseRust(text) {
@@ -653,7 +687,7 @@ function isOwnRustFrame(fn, file) {
 // src/parsers/java.ts
 var HEADER = /^(?:Exception in thread "([^"]*)" )?([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+)(?:: (.*))?\n\s+at /m;
 var CAUSED_BY = /^Caused by: ([a-zA-Z_$][\w$.]*)(?:: (.*))?$/;
-var FRAME = /^\s+at (?:[\w.-]+(?:@[\w.-]+)?\/)?([\w$.<>/-]+)\(([^)]*)\)$/;
+var FRAME = /^\s+at (?:[\w.-]+(?:@[\w.-]+)?\/\/?)?([\w$.<>/-]+)\(([^)]*)\)$/;
 var MORE = /^\s+\.\.\. (\d+) more$/;
 var LIBRARY_PACKAGES = /^(java|javax|jdk|sun|com\.sun|kotlin|kotlinx|scala|org\.junit|org\.springframework|org\.apache|org\.hibernate|io\.netty|com\.fasterxml|reactor|okhttp3|com\.google\.common)\./;
 function parseJava(text) {
@@ -664,8 +698,17 @@ function parseJava(text) {
   const blocks = [
     { type: header[2] ?? "", message: header[3] ?? "", frames: [] }
   ];
+  let suppressed = false;
   for (const line of lines.slice(1)) {
     const current = blocks[blocks.length - 1];
+    if (/^\s+Suppressed: /.test(line)) {
+      suppressed = true;
+      continue;
+    }
+    if (suppressed) {
+      if (/^\s/.test(line)) continue;
+      suppressed = false;
+    }
     const at = FRAME.exec(line);
     if (at !== null) {
       current.frames.push(javaFrame(at[1] ?? "", at[2] ?? ""));
@@ -711,7 +754,15 @@ function simpleName(type) {
 
 // src/parsers/node.ts
 var HEADER2 = /^([A-Z][\w$]*)(?: \[([\w$]+)\])?: (.*)\n\s+at /m;
-var FRAME2 = /^\s+at (?:async )?(?:(.+?) \((.*)\)|(.*))$/;
+var FRAME_START = /^\s+at (?:async )?/;
+function frameParts(line) {
+  const start = FRAME_START.exec(line);
+  if (start === null) return null;
+  const rest = line.slice(start[0].length);
+  const open3 = rest.indexOf(" (");
+  const parts = rest.endsWith(")") && open3 > 0 ? [rest, rest.slice(0, open3), rest.slice(open3 + 2, -1), void 0] : [rest, void 0, void 0, rest];
+  return parts;
+}
 var PLACE = /^(.*):(\d+):(\d+)$/;
 var SOURCE_PREAMBLE = /^(\S.*):(\d+)\n(.*)\n *\^+ *\n\n$/;
 function parseNode(text) {
@@ -725,7 +776,7 @@ function parseNode(text) {
   if (preamble !== null) start = above.length - preambleText.length;
   const frames = [];
   for (const line of text.slice(header.index).split("\n").slice(1)) {
-    const match = FRAME2.exec(line);
+    const match = frameParts(line);
     if (match === null) break;
     const name = match[1] ?? null;
     const place = PLACE.exec(match[2] ?? match[3] ?? "");
@@ -762,9 +813,9 @@ function isOwnNodeFile(file) {
 
 // src/parsers/python.ts
 var BANNER = "Traceback (most recent call last):";
-var FRAME3 = /^ {2}File "(.+)", line (\d+), in (.+)$/;
+var FRAME2 = /^ {2}File "(.+)", line (\d+), in (.+)$/;
 var EXCEPTION = /^([A-Za-z_][\w.]*)(?:: ?(.*))?$/;
-var MARKERS = /^\s*[~^\s]+$/;
+var MARKERS = /^[\s~^]+$/;
 var DIRECT_CAUSE = "The above exception was the direct cause of the following exception:";
 function parsePython(text) {
   const start = text.indexOf(BANNER);
@@ -782,7 +833,7 @@ function parsePython(text) {
     index++;
     const frames = [];
     while (index < lines.length) {
-      const match = FRAME3.exec(lines[index] ?? "");
+      const match = FRAME2.exec(lines[index] ?? "");
       if (match === null) {
         const line = lines[index] ?? "";
         if (line.startsWith("  ") || MARKERS.test(line)) {
@@ -829,13 +880,13 @@ function parsePython(text) {
   });
 }
 function isOwnPythonFile(file) {
-  return !/(site-packages|dist-packages|\/lib\/python\d|^<frozen|^<string>)/.test(file);
+  return !/(site-packages|dist-packages|[\\/]lib[\\/]python\d|[\\/]python\d*[\\/]lib[\\/]|^<frozen|^<string>)/i.test(file);
 }
 
 // src/parsers/sanitizer.ts
 var REPORT = /^==\d+==(?:ERROR|WARNING): (\w+Sanitizer): (.+)$/m;
 var UBSAN = /^(.+?):(\d+):(\d+): runtime error: (.+)$/m;
-var FRAME4 = /^\s+#\d+ 0x[0-9a-f]+(?: in (.+?))?(?: (\S+?))?(?: \(BuildId: [0-9a-f]+\))?$/;
+var FRAME3 = /^\s+#\d+ 0x[0-9a-f]+(?: in (.+?))?(?: (\S+?))?(?: \(BuildId: [0-9a-f]+\))?$/;
 var SOURCE = /^(.+?):(\d+)(?::(\d+))?$/;
 var ACCESS = /^(READ|WRITE) of size (\d+) at (0x[0-9a-f]+) thread (\S+)/m;
 var SUMMARY = /^SUMMARY: \w+Sanitizer: \S+ (.+?):(\d+)(?::(\d+))? in /m;
@@ -893,7 +944,7 @@ function readStacks(lines) {
   let title = "";
   let current = null;
   for (const line of lines) {
-    const match = FRAME4.exec(line);
+    const match = FRAME3.exec(line);
     if (match !== null && /^\s+#\d+ /.test(line)) {
       if (current === null) {
         current = [];
@@ -930,8 +981,9 @@ var err = (tag, message, detail) => ({
 
 // src/failure.ts
 var PARSERS = [parseSanitizer, parsePython, parseJava, parseGo, parseRust, parseNode];
+var MAX_LINE = 4096;
 function parseFailure(text) {
-  const normalized = text.replaceAll("\r\n", "\n");
+  const normalized = text.replaceAll("\r\n", "\n").split("\n").map((line) => line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line).join("\n");
   for (const parse of PARSERS) {
     const parsed = parse(normalized);
     if (parsed !== null) return ok(parsed);
@@ -962,7 +1014,6 @@ function lineStart(text, index) {
 
 // src/failureIssue.ts
 import { createHash } from "node:crypto";
-import { basename as basename2 } from "node:path";
 
 // src/rules.ts
 var NIL_STEPS = [
@@ -1591,6 +1642,9 @@ function fallback(failure2) {
 }
 
 // src/failureIssue.ts
+function basename2(path) {
+  return path.split(/[\\/]/).pop() ?? path;
+}
 var LANGUAGE = {
   go: "Go",
   rust: "Rust",
@@ -1721,7 +1775,7 @@ function stackLines(frames) {
   return hidden <= 1 ? lines : [...lines, `  \u2026 ${hidden} more frames in runtime or library code`];
 }
 function logContext(text, start) {
-  const lines = text.slice(0, start).split("\n").map((line) => line.replace(/\s+$/, "")).filter((line) => line !== "");
+  const lines = text.slice(0, start).split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
   return lines.slice(-LOG_CONTEXT_LINES).map((line) => truncate(line, 300));
 }
 function locations(failure2) {
@@ -1729,6 +1783,7 @@ function locations(failure2) {
   return [...withFile.filter((f) => f.own), ...withFile.filter((f) => !f.own)].map((f) => ({
     file: f.file,
     line: f.line,
+    ...f.column === null ? {} : { column: f.column },
     function: f.function,
     own: f.own
   }));
@@ -1780,9 +1835,10 @@ function renderIssueMarkdown(issue, depth = 0) {
   ];
   for (const section of issue.sections) {
     lines.push(`${h(2)} ${section.heading}`, "");
-    if (section.kind === "code")
-      lines.push("```" + section.language, ...section.lines, "```", "");
-    else if (section.kind === "markdown") lines.push(section.markdown, "");
+    if (section.kind === "code") {
+      const fence = fenceFor(section.lines);
+      lines.push(fence + section.language, ...section.lines, fence, "");
+    } else if (section.kind === "markdown") lines.push(section.markdown, "");
     else lines.push(...section.items.map((item) => `- ${item}`), "");
   }
   lines.push(
@@ -1825,6 +1881,10 @@ function withLog(issue, lines) {
       { heading: "Last log lines", kind: "code", language: "", lines }
     ]
   };
+}
+function fenceFor(lines) {
+  const longest = Math.max(0, ...lines.map((line) => Math.max(0, ...(line.match(/`+/g) ?? []).map((run) => run.length))));
+  return "`".repeat(Math.max(3, longest + 1));
 }
 function cell(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
@@ -2182,9 +2242,9 @@ function parseGdbOutput(stdout, stderr) {
     )
   };
 }
-var FRAME5 = /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(\S+) \(.*?\)(?: (?:at|from) (.+))?$/i;
+var FRAME4 = /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(\S+) \(.*?\)(?: (?:at|from) (.+))?$/i;
 function parseFrame(line) {
-  const match = FRAME5.exec(line.trim());
+  const match = FRAME4.exec(line.trim());
   if (match === null) return [];
   return [
     {
@@ -2683,10 +2743,13 @@ function analyzeText(text, name) {
 function analyzeFile(path) {
   let bytes;
   try {
-    bytes = readFileSync(path === "-" ? 0 : path);
+    if (path !== "-" && !statSync(path).isFile()) return { ok: false, message: `${path} is not a regular file.` };
+    bytes = readLimited(path === "-" ? 0 : path, "head");
   } catch (error) {
     return { ok: false, message: `Could not read ${path}: ${error.message}` };
   }
+  if (bytes.length > MAX_TEXT_BYTES)
+    return { ok: false, message: `${path} is larger than ${MAX_TEXT_BYTES / 1024 / 1024} MiB; pass the part around the failure.` };
   if (bytes.subarray(0, 4).equals(ELF_MAGIC))
     return {
       ok: false,
@@ -2701,7 +2764,8 @@ async function analyzeCore(input) {
   if (input.logPath !== void 0) {
     let log;
     try {
-      log = readFileSync(input.logPath, "utf8");
+      if (!statSync(input.logPath).isFile()) throw new Error("not a regular file");
+      log = readLimited(input.logPath, "tail").toString("utf8");
     } catch (error) {
       return { ok: false, message: `Could not read ${input.logPath}: ${error.message}` };
     }
@@ -2709,43 +2773,47 @@ async function analyzeCore(input) {
   }
   return { ok: true, issue, details: coreDetails(result.value) };
 }
-
-// src/batch.ts
-import { readdir, readFile } from "node:fs/promises";
-import { join as join2, relative } from "node:path";
-
-// src/fileKind.ts
-import { open as open2, stat } from "node:fs/promises";
-var MAX_TEXT_BYTES = 8 * 1024 * 1024;
-var ET_EXEC = 2;
-var ET_DYN = 3;
-var ET_CORE = 4;
-async function detectFile(path) {
-  const handle2 = await open2(path, "r");
+function readLimited(path, from) {
+  const fd = path === 0 ? 0 : openSync(path, "r");
   try {
-    const head = Buffer.alloc(18);
-    const { bytesRead } = await handle2.read(head, 0, 18, 0);
-    if (bytesRead >= 18 && head.readUInt32BE(0) === 2135247942) {
-      const type = head.readUInt16LE(16);
-      if (type === ET_CORE) return { kind: "core" };
-      if (type === ET_EXEC || type === ET_DYN) return { kind: "binary" };
-      return { kind: "other", reason: "ELF file that is neither a core dump nor an executable" };
+    const size = path === 0 ? Infinity : statSync(path).size;
+    let position = from === "tail" && size > MAX_TEXT_BYTES ? size - MAX_TEXT_BYTES : 0;
+    const limit = from === "tail" ? MAX_TEXT_BYTES : MAX_TEXT_BYTES + 1;
+    const chunks = [];
+    let total = 0;
+    while (total < limit) {
+      const chunk = Buffer.alloc(Math.min(1 << 16, limit - total));
+      let n;
+      try {
+        n = readSync(fd, chunk, 0, chunk.length, path === 0 ? null : position);
+      } catch (error) {
+        if (error.code === "EAGAIN") continue;
+        throw error;
+      }
+      if (n === 0) break;
+      chunks.push(chunk.subarray(0, n));
+      total += n;
+      position += n;
     }
-    if ((await stat(path)).size > MAX_TEXT_BYTES)
-      return { kind: "other", reason: "larger than 8 MiB and not a core dump" };
-    if (head.subarray(0, bytesRead).includes(0))
-      return { kind: "other", reason: "binary file that is not a core dump" };
-    return { kind: "text" };
+    return Buffer.concat(chunks);
   } finally {
-    await handle2.close();
+    if (path !== 0) closeSync(fd);
   }
 }
 
 // src/batch.ts
+import { readdir, readFile } from "node:fs/promises";
+import { join as join2, relative } from "node:path";
 var MAX_DEPTH = 4;
 async function triageBatch(options) {
   const files = await listFiles(options.directory);
-  const candidates = await Promise.all(files.map(detect));
+  if (files.length > MAX_BATCH_FILES)
+    throw new Error(`${options.directory} has more than ${MAX_BATCH_FILES} files; point --batch at a smaller folder.`);
+  const candidates = [];
+  await forEachLimit(files, 16, async (file) => {
+    candidates.push(await detect(file));
+  });
+  candidates.sort((a, b) => a.path.localeCompare(b.path));
   const issues = [];
   const skipped = [];
   const name = (path) => relative(options.directory, path) || path;
@@ -2836,7 +2904,7 @@ function renderBatchMarkdown(result) {
       `Files: ${shown.join(", ")}${more}`,
       "",
       "<details>",
-      `<summary>Full report for <code>${g.files[0]}</code></summary>`,
+      `<summary>Full report for <code>${escapeHtml(g.files[0] ?? "")}</code></summary>`,
       "",
       renderIssueMarkdown(g.issue, 2),
       "</details>",
@@ -2890,6 +2958,10 @@ async function forEachLimit(items, limit, run) {
   });
   await Promise.all(workers);
 }
+var MAX_BATCH_FILES = 1e4;
+function escapeHtml(text) {
+  return text.replace(/[&<>"']/g, (c2) => `&#${c2.charCodeAt(0)};`);
+}
 
 // src/mcp.ts
 import { isAbsolute as isAbsolute2, resolve } from "node:path";
@@ -2898,11 +2970,11 @@ import { createInterface } from "node:readline";
 // src/source.ts
 import { execFile as execFile4 } from "node:child_process";
 import { readdir as readdir2, readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { basename as basename5, extname as extname2, isAbsolute, join as join3, relative as relative3, sep } from "node:path";
+import { basename as basename5, extname as extname2, isAbsolute, join as join4, relative as relative3, sep as sep2 } from "node:path";
 
 // src/trace.ts
 import { readFile as readFile2 } from "node:fs/promises";
-import { basename as basename4, extname, relative as relative2 } from "node:path";
+import { basename as basename4, dirname as dirname2, extname, join as join3, relative as relative2, sep } from "node:path";
 var LANG = {
   ".py": "python",
   ".js": "js",
@@ -2917,6 +2989,16 @@ var MAX_SCANNED_FILES = 3e3;
 var MAX_FILE_BYTES = 1024 * 1024;
 var IDENT = "[A-Za-z_$][\\w$]*";
 var NIL_KINDS = /* @__PURE__ */ new Set(["node-undefined-access", "node-undefined-write", "python-none"]);
+var MODULE_FRAME = /^(?:<module>|Object\.<anonymous>)$/;
+var COMPREHENSION_FRAME = /^<\w*(?:expr|comp)>$/;
+var EXTERNAL = /\b(?:json\.loads?|JSON\.parse|yaml\.\w*load|request|req|response|res)\b|\.json\(\)/;
+var MAX_LINE2 = 2e3;
+function c(text) {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  if (longest === 0) return "`" + text + "`";
+  const fence = "`".repeat(longest + 1);
+  return `${fence} ${text} ${fence}`;
+}
 var OPERAND = /unsupported operand type|can only concatenate|must be str|must be real number|not supported between instances/;
 async function traceValue(kind, message, frames, root, allFiles) {
   const crash = frames[0];
@@ -2929,141 +3011,163 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const hypotheses = [];
   const steps = [];
   const code2 = [];
-  const at = (file, index) => `\`${relative2(root, file)}:${index + 1}\``;
-  const addDefinition = (def, role) => {
-    if (code2.some((c) => c.heading.includes(`(${def.name})`))) return;
+  const at = (file, index) => c(`${relative2(root, file)}:${index + 1}`);
+  const addDefinition = (def2, role) => {
+    if (code2.some((c2) => c2.heading.includes(`(${def2.name})`))) return;
     code2.push({
-      heading: `Code: ${relative2(root, def.file)}:${def.start + 1} (${def.name}), ${role}`,
+      heading: `Code: ${relative2(root, def2.file)}:${def2.start + 1} (${def2.name}), ${role}`,
       language: lang === "python" ? "python" : "javascript",
-      lines: numbered(def.lines, def.start)
+      lines: numbered(def2.lines, def2.start)
     });
   };
   if (lang === "python" && OPERAND.test(message)) {
     for (const match of crashLine.matchAll(new RegExp(`\\b(${IDENT})\\.(${IDENT})\\b`, "g"))) {
       const [, mod, name2] = match;
-      const file = (await allFiles()).find((f) => basename4(f) === `${mod}.py`);
-      const lines = file === void 0 ? null : await files.lines(file);
-      if (file === void 0 || lines === null) continue;
+      const file = await files.moduleFile(mod, crash.file, lang, allFiles);
+      const lines = file === null ? null : await files.lines(file);
+      if (file === null || lines === null) continue;
       const index = lines.findIndex((l) => new RegExp(`^${name2}\\s*(?::[^=]+)?=(?!=)`).test(l));
       if (index === -1) continue;
-      steps.push(`\`${mod}.${name2}\` is set at ${at(file, index)}: \`${lines[index]?.trim()}\``);
-      const env = environment(lines[index] ?? "");
-      if (env !== null)
+      const line = lines[index] ?? "";
+      steps.push(`${c(`${mod}.${name2}`)} is set at ${at(file, index)}: ${c(line.trim())}`);
+      const env = environment(line);
+      const converted = new RegExp(`=\\s*(?:int|float|Decimal|bool|complex)\\s*\\(`).test(line);
+      if (env !== null && !converted && /'str'/.test(message))
         hypotheses.push(
-          `**Environment value used as a number.** \`${mod}.${name2}\` comes from ${env} at ${at(file, index)}, which is always a string. Convert it where it is read (\`int(...)\` or \`float(...)\`), not at each use.`
+          `**Environment value used as a number.** ${c(`${mod}.${name2}`)} comes from ${env} at ${at(file, index)}, which is always a string. Convert it where it is read (\`int(...)\` or \`float(...)\`), not at each use.`
         );
     }
     return hypotheses.length + steps.length === 0 ? null : { hypotheses, steps, code: code2 };
   }
-  const target = targetOf(kind, message, crashLine);
+  const target = targetOf(kind, message, crashLine, crash.column);
   if (target === null) return null;
-  steps.push(`The bad value is \`${target.expr}\` at ${at(crash.file, crash.line - 1)}.`);
+  steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
   const follow = async (start, from) => {
     let name2 = start;
+    let element2 = false;
     const names2 = /* @__PURE__ */ new Set([name2]);
+    const done = (frame2, producer2) => ({ name: name2, names: names2, frame: frame2, producer: producer2, element: element2 });
     for (let f = from; f < frames.length; f++) {
       const frame2 = frames[f];
       const lines = await files.lines(frame2.file);
       if (lines === null) break;
-      let index = /^<\w*(?:expr|comp)>$/.test(frame2.function) ? frame2.line : frame2.line - 1;
-      const fn = functionStart(lines, frame2.line - 1, frame2.function, lang);
-      let assigned = assignment(lines, fn === null ? 0 : fn.index + 1, index, name2, lang);
+      const comprehension = COMPREHENSION_FRAME.test(frame2.function);
+      const moduleLevel = MODULE_FRAME.test(frame2.function);
+      const fn = comprehension || moduleLevel ? null : functionStart(lines, frame2.line - 1, frame2.function, lang);
+      if (fn === null && !comprehension && !moduleLevel) break;
+      const from2 = fn !== null ? fn.index + 1 : comprehension ? frame2.line - 1 : 0;
+      let index = comprehension ? frame2.line : frame2.line - 1;
+      let assigned = assignment(lines, from2, index, name2, lang);
       while (assigned !== null) {
-        steps.push(`\`${name2}\` is assigned at ${at(frame2.file, assigned.index)}: \`${lines[assigned.index]?.trim()}\``);
+        const text = lines[assigned.index]?.trim() ?? "";
+        steps.push(
+          assigned.loop ? `${c(name2)} is an element of ${c(assigned.rhs)} (${at(frame2.file, assigned.index)}).` : `${c(name2)} is assigned at ${at(frame2.file, assigned.index)}: ${c(text)}`
+        );
+        element2 ||= assigned.loop;
         const alias = new RegExp(`^(${IDENT})$`).exec(assigned.rhs);
         if (alias === null || names2.has(alias[1]))
-          return { name: name2, names: names2, frame: f, producer: { file: frame2.file, index: assigned.index, expr: assigned.rhs } };
+          return done(f, { file: frame2.file, index: assigned.index, expr: assigned.rhs, element: element2 });
         name2 = alias[1];
         names2.add(name2);
         index = assigned.index;
-        assigned = assignment(lines, fn === null ? 0 : fn.index + 1, index, name2, lang);
+        assigned = assignment(lines, from2, index, name2, lang);
       }
-      if (/^<\w*(?:expr|comp)>$/.test(frame2.function)) continue;
-      const position = fn === null ? -1 : fn.params.indexOf(name2);
-      if (position === -1) break;
+      if (comprehension) continue;
+      if (fn === null || !fn.params.includes(name2)) break;
       const caller = frames[f + 1];
       const callerLine = caller === void 0 ? void 0 : (await files.lines(caller.file))?.[caller.line - 1];
       if (caller === void 0 || callerLine === void 0) {
-        steps.push(`\`${name2}\` is a parameter of \`${shortName(frame2.function)}\`; its caller is not in the stack.`);
+        steps.push(`${c(name2)} is a parameter of ${c(shortName(frame2.function))}; its caller is not in the stack.`);
         break;
       }
-      const arg = callArgs(callerLine, shortName(frame2.function))?.[position];
-      if (arg === void 0) break;
-      steps.push(`\`${name2}\` is parameter ${position + 1} of \`${shortName(frame2.function)}\`, passed as \`${arg}\` at ${at(caller.file, caller.line - 1)}.`);
-      const simple = new RegExp(`^(${IDENT})$`).exec(arg.trim());
-      if (simple === null)
-        return { name: name2, names: names2, frame: f + 1, producer: { file: caller.file, index: caller.line - 1, expr: arg.trim() } };
+      const args = callArgs(callerLine, shortName(frame2.function));
+      const arg = args === null ? null : argumentFor(fn, args, name2, lang);
+      if (arg === null) break;
+      steps.push(`${c(name2)} is a parameter of ${c(shortName(frame2.function))}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
+      const simple = new RegExp(`^(${IDENT})$`).exec(arg);
+      if (simple === null) return done(f + 1, { file: caller.file, index: caller.line - 1, expr: arg, element: element2 });
       name2 = simple[1];
       names2.add(name2);
     }
-    return { name: name2, names: names2, frame: -1, producer: null };
+    return done(-1, null);
   };
-  const chain = target.expr.endsWith(")") ? { name: target.expr, names: /* @__PURE__ */ new Set(), frame: 0, producer: { file: crash.file, index: crash.line - 1, expr: target.expr } } : await follow(target.root, 0);
+  const chain = target.expr.endsWith(")") ? { name: target.expr, names: /* @__PURE__ */ new Set(), frame: 0, producer: { file: crash.file, index: crash.line - 1, expr: target.expr }, element: false } : await follow(target.root, 0);
   const { name, names, producer } = chain;
+  const element = producer?.element === true;
   const seeds = [];
-  const lookupCall = producer === null ? null : callee(producer.expr);
-  const lookupDef = lookupCall === null || producer === null ? null : await files.definition(lookupCall.short, lookupCall.module, producer.file, lang, allFiles);
-  const isLookup = producer !== null && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || lookupDef !== null && LOOKUP.test(lookupDef.lines.join("\n")));
+  const call = producer === null ? null : callee(producer.expr);
+  const def = call === null || producer === null ? null : await files.definition(call.short, call.module, producer.file, lang, allFiles);
+  const isLookup = producer !== null && !element && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || def !== null && LOOKUP.test(def.lines.join("\n")));
   const key = producer === null || !isLookup ? null : lookupKey(producer.expr);
   if (producer !== null && key !== null) {
     const simple = new RegExp(`^${IDENT}$`).test(key);
     const keyChain = simple ? await follow(key, chain.frame) : null;
     const expr = simple ? keyChain?.producer?.expr ?? null : key;
     const from = simple ? keyChain?.producer ?? null : producer;
-    const literal = expr === null || from === null ? null : await files.literalOf(expr, from.file, from.index, allFiles);
+    let literal = expr === null || from === null ? null : await files.literalOf(expr, from.file, from.index, allFiles);
+    const member = expr === null ? null : new RegExp(`^(${IDENT})\\.(${IDENT})$`).exec(expr);
+    if (literal === null && member !== null && from !== null) {
+      const owner = await follow(member[1], simple ? Math.max(keyChain?.frame ?? 0, 0) : chain.frame);
+      const objectText = owner.producer?.expr ?? "";
+      const field = new RegExp(`^\\{.*\\b${member[2]}\\s*:\\s*((["'])[^"'\\n]*\\2)`).exec(objectText);
+      if (owner.producer !== null && field !== null)
+        literal = { value: field[1], file: owner.producer.file, index: owner.producer.index };
+    }
     if (literal !== null) {
-      steps.push(`The lookup key is \`${literal.value}\`${expr === literal.value ? "" : ` (\`${expr}\`)`}, set at ${at(literal.file, literal.index)}.`);
+      steps.push(`The lookup key is ${c(literal.value)}${expr === literal.value ? "" : ` (${c(expr ?? "")})`}, set at ${at(literal.file, literal.index)}.`);
       seeds.push({ value: literal.value.slice(1, -1), file: literal.file, index: literal.index });
     }
   }
   if (producer !== null) {
-    const call = callee(producer.expr);
-    const def = call === null ? null : await files.definition(call.short, call.module, producer.file, lang, allFiles);
     if (call !== null && def !== null) {
-      addDefinition(def, `produces \`${name}\``);
-      if (def.async && !call.awaited)
+      addDefinition(def, element ? `produces the collection ${c(name)} comes from` : `produces ${c(name)}`);
+      const promiseShaped = lang === "js" ? target.expr !== target.root && !target.expr.startsWith(`${target.root}(`) : /'coroutine' object/.test(message);
+      if (def.async && !call.awaited && !element && promiseShaped)
         hypotheses.push(
-          lang === "js" ? `**Missing \`await\`.** \`${def.name}\` is \`async\`, so \`${producer.expr.trim()}\` at ${at(producer.file, producer.index)} returns a Promise. \`${name}\` is that Promise, not the value, so \`${target.expr}\` is \`undefined\`. Likely fix: \`await\` the call (and make the caller \`async\`).` : `**Missing \`await\`.** \`${def.name}\` is \`async def\`, so \`${producer.expr.trim()}\` at ${at(producer.file, producer.index)} returns a coroutine, not the value. Likely fix: \`await\` the call.`
+          lang === "js" ? `**Missing \`await\`.** ${c(def.name)} is \`async\`, so ${c(producer.expr)} at ${at(producer.file, producer.index)} returns a Promise. ${c(name)} is that Promise, not the value, so ${c(target.expr)} is \`undefined\`. Likely fix: \`await\` the call.` : `**Missing \`await\`.** ${c(def.name)} is \`async def\`, so ${c(producer.expr)} at ${at(producer.file, producer.index)} returns a coroutine, not the value. Likely fix: \`await\` the call.`
         );
-      else if (NIL_KINDS.has(kind) && LOOKUP.test(def.lines.join("\n")))
+      else if (isLookup && LOOKUP.test(def.lines.join("\n")))
         hypotheses.push(
-          `**The lookup found nothing.** \`${def.name}\` returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and \`${producer.expr.trim()}\` at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
+          `**The lookup found nothing.** ${c(def.name)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
         );
       const shifted = zipShift(def);
       if (shifted !== null)
         hypotheses.push(
-          `**Columns shifted.** \`${shifted.text}\` at ${at(def.file, shifted.index)} pairs \`${shifted.left}\` with \`${shifted.right}\`, which are sliced differently, so each key gets the next column's value${target.key === null ? "" : ` and the last key (here \`${target.key}\`) can go missing`}. Line the two sides up.`
+          `**Columns shifted.** ${c(shifted.text)} at ${at(def.file, shifted.index)} pairs ${c(shifted.left)} with ${c(shifted.right)}, which are sliced differently, so each key gets the next column's value${target.key === null ? "" : ` and the last key (here ${c(target.key)}) can go missing`}. Line the two sides up.`
         );
-    } else if (NIL_KINDS.has(kind) && LOOKUP.test(producer.expr))
+    } else if (isLookup)
       hypotheses.push(
-        `**The lookup found nothing.** \`${producer.expr.trim()}\` at ${at(producer.file, producer.index)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
+        `**The lookup found nothing.** ${c(producer.expr)} at ${at(producer.file, producer.index)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
       );
   }
-  if (NIL_KINDS.has(kind)) {
+  if (NIL_KINDS.has(kind) && seeds.length > 0) {
     const mismatch = await caseMismatch(frames, seeds, files, root, allFiles);
     if (mismatch !== null) hypotheses.push(mismatch);
   }
-  const builder = target.key === null ? null : await builtWithout(target.key, names, frames, files, lang, await allFiles());
-  if (builder !== null) {
-    const near = builder.keys.filter((k) => similar(k, target.key));
+  const selfRooted = ["this", "self"].includes(target.root);
+  const external = producer !== null && EXTERNAL.test(producer.expr);
+  const fieldNames = new Set([...names].filter((n) => n !== "this" && n !== "self"));
+  const builder = target.key === null || selfRooted || external ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
+  const builderNear = builder === null ? [] : builder.keys.filter((k) => similar(k, target.key));
+  if (builder !== null && builderNear.length > 0) {
     hypotheses.push(
-      `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => `\`${k}\``).join(", ")}, which this code also reads, but no \`${target.key}\`${near.length > 0 ? `; it has ${near.map((k) => `\`${k}\``).join(", ")} instead` : ""}. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
+      `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
     );
-  } else if (target.key !== null) {
+  } else if (target.key !== null && !selfRooted && !external) {
     const keys = await writtenKeys(await allFiles(), files, lang);
     const exact = keys.filter((k) => k.key === target.key);
     const near = keys.filter((k) => k.key !== target.key && similar(k.key, target.key));
     if (exact.length === 0 && near.length > 0) {
-      const list = unique(near.map((k) => `\`${k.key}\` (${at(k.file, k.index)})`)).slice(0, 3).join(", ");
+      const list = unique(near.map((k) => `${c(k.key)} (${at(k.file, k.index)})`)).slice(0, 3).join(", ");
       hypotheses.push(
-        `**Field name mismatch.** No code under the source root writes \`${target.key}\`, but ${list} ${near.length === 1 ? "is" : "are"} written. The code that builds this ${lang === "python" ? "dict" : "object"} and the code that reads it probably disagree on the name; fix one side rather than defaulting the missing key.`
+        `**Field name mismatch.** No code under the source root writes ${c(target.key)}, but ${list} ${near.length === 1 ? "is" : "are"} written. The code that builds this ${lang === "python" ? "dict" : "object"} and the code that reads it probably disagree on the name; fix one side rather than defaulting the missing key.`
       );
     }
   }
   return { hypotheses, steps, code: code2 };
 }
 var LOOKUP = /\.find\(|\.get\(|\.findOne\(|\.first\(|\.filter\(|\.search\(|\.match\(|\.query\(/;
-function targetOf(kind, message, line) {
+function targetOf(kind, message, line, column) {
   const path = `${IDENT}(?:\\??\\.${IDENT}|\\[[^\\]]+\\]|\\([^()]*\\))*`;
   let pattern = null;
   let key = null;
@@ -3081,7 +3185,11 @@ function targetOf(kind, message, line) {
     pattern = new RegExp(`(${path})\\s*\\[\\s*['"]${escape(key)}['"]\\s*\\]`);
   }
   if (pattern === null) return null;
-  const expr = pattern.exec(line)?.[1];
+  const matches = [...line.matchAll(new RegExp(pattern.source, "g"))];
+  const pick = column === void 0 || matches.length < 2 ? matches[0] : matches.reduce(
+    (best, m) => Math.abs((m.index ?? 0) + m[0].length - column) < Math.abs((best.index ?? 0) + best[0].length - column) ? m : best
+  );
+  const expr = pick?.[1];
   if (expr === void 0) return null;
   const root = new RegExp(`^${IDENT}`).exec(expr)?.[0];
   if (key === null && kind.startsWith("node-")) {
@@ -3092,31 +3200,49 @@ function targetOf(kind, message, line) {
 }
 function functionStart(lines, index, fnName, lang) {
   const name = shortName(fnName);
-  if (name === "" || name === "<module>" || name === "<anonymous>" || fnName.includes("<anonymous>")) return null;
+  if (name === "" || name.includes("<")) return null;
   const n = escape(name);
+  const generics = "(?:<[^>()]*>)?";
   const patterns = lang === "python" ? [new RegExp(`^\\s*(?:async\\s+)?def\\s+${n}\\s*\\(`)] : [
-    new RegExp(`function\\s*\\*?\\s*${n}\\s*\\(`),
-    new RegExp(`\\b${n}\\s*[:=]\\s*(?:async\\s*)?(?:function\\b|\\([^)]*\\)\\s*=>|${IDENT}\\s*=>)`),
-    new RegExp(`^\\s*(?:static\\s+)?(?:async\\s+)?${n}\\s*\\([^)]*\\)\\s*\\{`)
+    new RegExp(`function\\s*\\*?\\s*${n}\\s*${generics}\\s*\\(`),
+    new RegExp(`\\b${n}\\s*(?::[^=]+)?[:=]\\s*(?:async\\s*)?(?:function\\b|${generics}\\s*\\([^)]*\\)\\s*(?::[^=]+)?=>|${IDENT}\\s*=>)`),
+    new RegExp(
+      `^\\s*(?:(?:public|private|protected|static|async|override|readonly|get|set)\\s+)*\\*?${n}\\s*${generics}\\s*\\([^)]*\\)\\s*(?::[^{]+)?\\{`
+    )
   ];
   for (let i = Math.min(index, lines.length - 1); i >= 0; i--) {
     const text = lines[i] ?? "";
     if (!patterns.some((p) => p.test(text))) continue;
-    return { index: i, params: params(lines.slice(i, i + 6).join(" "), name, lang) };
+    return { index: i, ...params(lines.slice(i, i + 6).join(" "), name, lang) };
   }
   return null;
 }
 function params(text, name, lang) {
   const arrow = new RegExp(`${escape(name)}\\s*[:=]\\s*(?:async\\s*)?(${IDENT})\\s*=>`).exec(text);
-  if (arrow !== null) return [arrow[1]];
+  if (arrow !== null) return { params: [arrow[1]], rest: -1 };
   const open3 = text.indexOf("(", text.indexOf(name) + name.length);
-  if (open3 === -1) return [];
+  if (open3 === -1) return { params: [], rest: -1 };
   const inner = balanced(text, open3);
-  if (inner === null) return [];
-  const list = splitTopLevel(inner).map(
+  if (inner === null) return { params: [], rest: -1 };
+  let raw = splitTopLevel(inner, lang === "js").map((p) => p.trim());
+  if (lang === "python" && (raw[0] === "self" || raw[0] === "cls")) raw = raw.slice(1);
+  const rest = raw.findIndex((p) => /^(?:\*|\.\.\.)/.test(p));
+  const list = raw.map(
     (p) => p.replace(/=.*$/s, "").replace(/:.*$/s, "").replace(/^[*.\s]+/, "").replace(/\?$/, "").trim()
   );
-  return lang === "python" && (list[0] === "self" || list[0] === "cls") ? list.slice(1) : list;
+  return { params: list, rest };
+}
+function argumentFor(fn, args, name, lang) {
+  const position = fn.params.indexOf(name);
+  if (position === -1) return null;
+  if (lang === "python") {
+    const keyword = args.find((a) => new RegExp(`^${escape(name)}\\s*=(?!=)`).test(a));
+    if (keyword !== void 0) return keyword.replace(/^[^=]*=/, "").trim();
+    if (fn.rest !== -1 && fn.rest <= position) return null;
+  }
+  const positional = lang === "python" ? args.filter((a) => !new RegExp(`^${IDENT}\\s*=(?!=)`).test(a)) : args;
+  if (positional.slice(0, position + 1).some((a) => /^(?:\*|\.\.\.)/.test(a))) return null;
+  return positional[position]?.trim() ?? null;
 }
 function assignment(lines, from, before, name, lang) {
   const n = escape(name);
@@ -3135,7 +3261,7 @@ function assignment(lines, from, before, name, lang) {
   for (let i = before - 1; i >= from; i--) {
     for (const p of patterns) {
       const match = p.exec(lines[i] ?? "");
-      if (match !== null) return { index: i, rhs: (match[1] ?? "").trim().replace(/;$/, "") };
+      if (match !== null) return { index: i, rhs: (match[1] ?? "").trim().replace(/;$/, ""), loop: /\bfor\b/.test(p.source) };
     }
   }
   return null;
@@ -3160,33 +3286,33 @@ function balanced(text, open3) {
   let depth = 0;
   let quote = null;
   for (let i = open3; i < text.length; i++) {
-    const c = text[i];
+    const c2 = text[i];
     if (quote !== null) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = null;
-    } else if (c === '"' || c === "'" || c === "`") quote = c;
-    else if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") {
+      if (c2 === "\\") i++;
+      else if (c2 === quote) quote = null;
+    } else if (c2 === '"' || c2 === "'" || c2 === "`") quote = c2;
+    else if (c2 === "(" || c2 === "[" || c2 === "{") depth++;
+    else if (c2 === ")" || c2 === "]" || c2 === "}") {
       depth--;
       if (depth === 0) return text.slice(open3 + 1, i);
     }
   }
   return null;
 }
-function splitTopLevel(text) {
+function splitTopLevel(text, angles = false) {
   const out = [];
   let depth = 0;
   let quote = null;
   let start = 0;
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
+    const c2 = text[i];
     if (quote !== null) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = null;
-    } else if (c === '"' || c === "'" || c === "`") quote = c;
-    else if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === "," && depth === 0) {
+      if (c2 === "\\") i++;
+      else if (c2 === quote) quote = null;
+    } else if (c2 === '"' || c2 === "'" || c2 === "`") quote = c2;
+    else if (c2 === "(" || c2 === "[" || c2 === "{" || angles && c2 === "<") depth++;
+    else if (c2 === ")" || c2 === "]" || c2 === "}" || angles && c2 === ">" && text[i - 1] !== "=") depth--;
+    else if (c2 === "," && depth === 0) {
       out.push(text.slice(start, i));
       start = i + 1;
     }
@@ -3198,7 +3324,7 @@ function splitTopLevel(text) {
 function environment(line) {
   const match = /os\.environ(?:\.get)?|os\.getenv|process\.env|sys\.argv|\binput\(/.exec(line);
   if (match === null) return null;
-  return match[0] === "sys.argv" ? "the command line" : match[0] === "input(" ? "user input" : `the environment (\`${match[0]}\`)`;
+  return match[0] === "sys.argv" ? "the command line" : match[0] === "input(" ? "user input" : `the environment (${c(match[0])})`;
 }
 function zipShift(def) {
   const side = `(${IDENT}(?:\\.${IDENT})*)(\\[[^\\]]*\\])?`;
@@ -3218,10 +3344,6 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
   const literal = /(["'])((?:(?!\1)[^\\\n])+)\1/g;
   const onStack = [...seeds];
   const candidates = /* @__PURE__ */ new Set([...frames.map((f) => f.file), ...seeds.map((s) => s.file)]);
-  for (const frame2 of frames) {
-    const line = (await files.lines(frame2.file))?.[frame2.line - 1] ?? "";
-    for (const m of line.matchAll(literal)) onStack.push({ value: m[2], file: frame2.file, index: frame2.line - 1 });
-  }
   if (onStack.length === 0) return null;
   const sameLang = (await allFiles()).filter((f) => LANG[extname(f)] === LANG[extname(frames[0]?.file ?? "")]);
   for (const f of sameLang.slice(0, 200)) candidates.add(f);
@@ -3233,7 +3355,7 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
         const value = m[2];
         const hit = onStack.find((s) => s.value !== value && s.value.toLowerCase() === value.toLowerCase() && /\w/.test(value));
         if (hit !== void 0)
-          return `**Possible case mismatch.** \`"${hit.value}"\` at \`${relative2(root, hit.file)}:${hit.index + 1}\` and \`"${value}"\` at \`${relative2(root, file)}:${i + 1}\` differ only in case. A lookup comparing them exactly finds nothing.`;
+          return `**Possible case mismatch.** The lookup key ${c(`"${hit.value}"`)} at ${c(`${relative2(root, hit.file)}:${hit.index + 1}`)} and ${c(`"${value}"`)} at ${c(`${relative2(root, file)}:${i + 1}`)} differ only in case. A lookup comparing them exactly finds nothing.`;
       }
   }
   return null;
@@ -3323,7 +3445,7 @@ var Files = class {
     if (!this.cache.has(file)) {
       try {
         const text = await readFile2(file, "utf8");
-        this.cache.set(file, text.length > MAX_FILE_BYTES ? null : text.split("\n"));
+        this.cache.set(file, text.length > MAX_FILE_BYTES ? null : text.split("\n").map((line) => line.length > MAX_LINE2 ? "" : line));
       } catch {
         this.cache.set(file, null);
       }
@@ -3353,26 +3475,79 @@ var Files = class {
     }
     return null;
   }
-  /** Where `name` is defined: the same file, then `module.ext`, then any file in the language. */
-  async definition(name, module, near, lang, allFiles) {
+  /**
+   * The file a module name refers to from `near`: its `require`/`import`
+   * specifier resolved relative to `near` (JS) or as a dotted path (Python),
+   * else a file named after it. Null when that is ambiguous.
+   */
+  async moduleFile(mod, near, lang, allFiles) {
+    const source = (await this.lines(near))?.join("\n") ?? "";
+    const m = escape(mod);
+    const spec = lang === "js" ? new RegExp(`\\b${m}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s+(?:\\*\\s+as\\s+)?${m}\\s+from\\s+["']([^"']+)["']`).exec(source)?.[1] ?? null : new RegExp(`^\\s*from\\s+([\\w.]+)\\s+import\\s+(?:.*,\\s*)?${m}\\b`, "m").exec(source)?.[1]?.concat(`.${mod}`) ?? new RegExp(`^\\s*import\\s+([\\w.]*\\b${m})\\b`, "m").exec(source)?.[1] ?? null;
+    return this.resolveSpec(spec ?? mod, near, lang, allFiles);
+  }
+  /** The file a function imported by name comes from: `from x import name`, `{ name } = require("./x")`, `import { name } from "./x"`. */
+  async importedFrom(name, near, lang, allFiles) {
+    const source = (await this.lines(near))?.join("\n") ?? "";
+    const n = escape(name);
+    const spec = lang === "js" ? new RegExp(`\\{[^}]*\\b${n}\\b[^}]*\\}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s*\\{[^}]*\\b${n}\\b[^}]*\\}\\s*from\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`(?:const|let|var)\\s+${n}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s+${n}\\s+from\\s*["']([^"']+)["']`).exec(source)?.[1] : new RegExp(`^\\s*from\\s+([\\w.]+)\\s+import\\s+[^\\n]*\\b${n}\\b`, "m").exec(source)?.[1];
+    return spec === void 0 ? void 0 : this.resolveSpec(spec, near, lang, allFiles);
+  }
+  async resolveSpec(spec, near, lang, allFiles) {
     const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang);
-    const order = module === null ? [near, ...all.slice(0, MAX_SCANNED_FILES)] : all.filter((f) => basename4(f, extname(f)) === module);
-    for (const file of unique(order)) {
-      if (!file.startsWith(this.root)) continue;
-      const lines = await this.lines(file);
-      if (lines === null) continue;
-      const fn = functionStart(lines, lines.length - 1, name, lang);
-      if (fn === null) continue;
-      const head = lines[fn.index] ?? "";
-      return {
-        name,
-        file,
-        start: fn.index,
-        lines: body(lines, fn.index, lang),
-        async: /\basync\b/.test(head.slice(0, head.indexOf(name) + name.length + 20))
-      };
+    if (lang === "js" && spec.startsWith(".")) {
+      const base = join3(dirname2(near), spec);
+      return all.find((f) => f === base || f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ?? null;
     }
-    return null;
+    if (lang === "js") return null;
+    const tail = `${sep}${spec.replace(/^\.+/, "").split(".").join(sep)}.py`;
+    const found = all.filter((f) => f.endsWith(tail) || basename4(f) === `${spec.split(".").pop()}.py`);
+    const exact = found.filter((f) => f.endsWith(tail));
+    return (exact.length === 1 ? exact[0] : found.length === 1 ? found[0] : null) ?? null;
+  }
+  /**
+   * Where `name` is defined, as seen from `near`: `mod.fn` in the module `mod`
+   * refers to; a bare `fn` in `near` itself, else where `near` imports it from,
+   * else the one file in the project that defines it (none if several do).
+   */
+  async definition(name, module, near, lang, allFiles) {
+    let order;
+    if (module !== null) {
+      const file = await this.moduleFile(module, near, lang, allFiles);
+      order = file === null ? [] : [file];
+    } else {
+      const imported = await this.importedFrom(name, near, lang, allFiles);
+      order = imported === void 0 ? [near] : imported === null ? [] : [imported];
+    }
+    for (const file of order) {
+      const found = await this.defineIn(file, name, lang);
+      if (found !== null) return found;
+    }
+    if (module !== null || order.length !== 1 || order[0] !== near) return null;
+    const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang).slice(0, MAX_SCANNED_FILES);
+    const matches = [];
+    for (const file of all) {
+      if (file === near) continue;
+      const found = await this.defineIn(file, name, lang);
+      if (found !== null) matches.push(found);
+      if (matches.length > 1) return null;
+    }
+    return matches[0] ?? null;
+  }
+  async defineIn(file, name, lang) {
+    if (!file.startsWith(this.root)) return null;
+    const lines = await this.lines(file);
+    if (lines === null) return null;
+    const fn = functionStart(lines, lines.length - 1, name, lang);
+    if (fn === null) return null;
+    const head = lines[fn.index] ?? "";
+    return {
+      name,
+      file,
+      start: fn.index,
+      lines: body(lines, fn.index, lang),
+      async: /\basync\b/.test(head.slice(0, head.indexOf(name) + name.length + 20))
+    };
   }
 };
 function body(lines, start, lang) {
@@ -3392,11 +3567,11 @@ function body(lines, start, lang) {
   for (let i = start; i < lines.length && out.length <= MAX_BODY_LINES; i++) {
     const line = lines[i] ?? "";
     if (i > start) out.push(line);
-    for (const c of line) {
-      if (c === "{") {
+    for (const c2 of line) {
+      if (c2 === "{") {
         depth++;
         opened = true;
-      } else if (c === "}") depth--;
+      } else if (c2 === "}") depth--;
     }
     if (opened && depth <= 0) break;
     if (!opened && i > start + 2) break;
@@ -3420,7 +3595,9 @@ var FENCE = {
   ".js": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
+  ".jsx": "javascript",
   ".ts": "typescript",
+  ".tsx": "typescript",
   ".go": "go",
   ".rs": "rust",
   ".c": "c",
@@ -3428,7 +3605,12 @@ var FENCE = {
   ".cc": "cpp",
   ".cpp": "cpp",
   ".cxx": "cpp",
-  ".hpp": "cpp"
+  ".hpp": "cpp",
+  ".rb": "ruby",
+  ".php": "php",
+  ".cs": "csharp",
+  ".scala": "scala",
+  ".swift": "swift"
 };
 async function attachSource(issue, root) {
   const realRoot = await realpath(root);
@@ -3445,7 +3627,7 @@ async function attachSource(issue, root) {
     const file = await resolveFile(realRoot, location, lookup);
     if (file === null) continue;
     if (traceFrames.length < MAX_TRACE_FRAMES)
-      traceFrames.push({ file, line: location.line, function: location.function });
+      traceFrames.push({ file, line: location.line, function: location.function, ...location.column === void 0 ? {} : { column: location.column } });
     if (snippets.length >= MAX_SNIPPETS) continue;
     const key = `${file}:${location.line}`;
     if (seen.has(key)) continue;
@@ -3498,10 +3680,11 @@ async function attachSource(issue, root) {
       first.push({ heading: "Hypotheses to check first", kind: "list", items: trace.hypotheses });
     if (trace.steps.length > 0)
       first.push({ heading: "Where the bad value came from", kind: "list", items: trace.steps });
-    for (const c of trace.code) first.push({ heading: c.heading, kind: "code", language: c.language, lines: c.lines });
+    for (const c2 of trace.code) first.push({ heading: c2.heading, kind: "code", language: c2.language, lines: c2.lines });
   }
-  const prefixes = [`${realRoot}${sep}`, ...isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep}`] : []];
-  const shorten = (text) => prefixes.reduce((t, p) => t.replaceAll(p, ""), text);
+  const prefixes = [`${realRoot}${sep2}`, ...isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep2}`] : []].filter((p) => p !== sep2);
+  const patterns = prefixes.map((p) => new RegExp(`(^|[\\s"'(\\[\`=])${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"));
+  const shorten = (text) => patterns.reduce((t, p) => t.replace(p, "$1"), text);
   return {
     ...issue,
     summary: shorten(issue.summary),
@@ -3521,19 +3704,19 @@ async function resolveFile(root, location, lookup) {
   const segments = location.file.split(/[\\/]+/).filter((s) => s !== "" && s !== "." && s !== "..");
   const candidates = [];
   if (isAbsolute(location.file)) candidates.push(location.file);
-  for (let k = 0; k < segments.length; k++) candidates.push(join3(root, ...segments.slice(k)));
+  for (let k = 0; k < segments.length; k++) candidates.push(join4(root, ...segments.slice(k)));
   if (location.file.endsWith(".java") || location.file.endsWith(".kt")) {
     const parts = location.function.split(".");
     const packagePath = parts.slice(0, -2);
     for (const prefix of ["", "src/main/java", "src/main/kotlin", "src", "app/src/main/java"])
-      candidates.push(join3(root, prefix, ...packagePath, location.file));
+      candidates.push(join4(root, prefix, ...packagePath, location.file));
   }
   for (const candidate of candidates) {
     const safe = await inside(root, candidate);
     if (safe !== null) return safe;
   }
   const sameName = await lookup(basename5(location.file));
-  const ranked = sameName.map((path) => ({ path, score: commonSuffix(path.split(sep), segments) })).sort((a, b) => b.score - a.score);
+  const ranked = sameName.map((path) => ({ path, score: commonSuffix(path.split(sep2), segments) })).sort((a, b) => b.score - a.score);
   if (ranked.length === 1 || ranked[0] && ranked[1] && ranked[0].score > ranked[1].score)
     return inside(root, ranked[0].path);
   return null;
@@ -3543,6 +3726,7 @@ async function inside(root, candidate) {
     const real = await realpath(candidate);
     const rel = relative3(root, real);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+    if (FENCE[extname2(real).toLowerCase()] === void 0 || rel.split(sep2).some((part) => part.startsWith("."))) return null;
     const info = await stat2(real);
     return info.isFile() && info.size <= MAX_FILE_BYTES2 ? real : null;
   } catch {
@@ -3568,11 +3752,11 @@ async function indexByBasename(root) {
     for (const entry of entries) {
       if (count >= MAX_SCAN_FILES) return;
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) await walk(join3(dir, entry.name), depth + 1);
+        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) await walk(join4(dir, entry.name), depth + 1);
       } else if (entry.isFile()) {
         count++;
         const list = index.get(entry.name) ?? [];
-        list.push(join3(dir, entry.name));
+        list.push(join4(dir, entry.name));
         index.set(entry.name, list);
       }
     }
@@ -3596,7 +3780,25 @@ function blame(root, file, line) {
   return new Promise((resolve3) => {
     execFile4(
       "git",
-      ["-C", root, "blame", "--porcelain", "-L", `${line},${line}`, "--", relative3(root, file)],
+      [
+        // The repo may be untrusted: its config must not make git run anything.
+        // Blaming HEAD (not the work tree) avoids fsmonitor and clean filters;
+        // --no-textconv avoids diff drivers; hooks are disabled for good measure.
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        root,
+        "blame",
+        "--porcelain",
+        "--no-textconv",
+        "-L",
+        `${line},${line}`,
+        "HEAD",
+        "--",
+        relative3(root, file)
+      ],
       { timeout: GIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
       (error, stdout) => {
         if (error) {
@@ -3821,6 +4023,7 @@ async function callTool(name, args, options) {
       const binary = path("binary_path", true);
       const name2 = args["function"];
       if (typeof name2 !== "string" || name2.trim() === "") throw new ToolError("function is required.");
+      if (name2.trim().startsWith("-")) throw new ToolError("function must be a name or address, not an option.");
       const match = /^(?:sub_|0x)([0-9a-f]+)$/i.exec(name2.trim());
       const target = match === null ? name2.trim() : BigInt(`0x${match[1]}`) + (await isPositionIndependent(binary) ? 0x100000n : 0n);
       const result = await decompileFunction(options.rea, binary, target);
@@ -3925,7 +4128,7 @@ import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile as readFile4, rm, stat as stat3 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { basename as basename6, dirname as dirname2, isAbsolute as isAbsolute3, join as join4 } from "node:path";
+import { basename as basename6, dirname as dirname3, isAbsolute as isAbsolute3, join as join5 } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 // src/web/page.ts
@@ -4427,7 +4630,7 @@ var MAX_JSON_BYTES = MAX_TEXT_BYTES * 2;
 var DEFAULT_MAX_UPLOAD = 4 * 1024 * 1024 * 1024;
 async function serve(options) {
   const token = randomBytes(24).toString("hex");
-  const uploadDir = await mkdtemp(join4(tmpdir(), "crashlens-"));
+  const uploadDir = await mkdtemp(join5(tmpdir(), "crashlens-"));
   const uploads = /* @__PURE__ */ new Map();
   const analyzed = [];
   let sourceRoot = options.sourceRoot;
@@ -4466,9 +4669,9 @@ async function serve(options) {
     "PUT /api/upload": async (req, url) => {
       const name = (url.searchParams.get("name") ?? "upload").slice(0, 200);
       const id = randomUUID();
-      const dir = join4(uploadDir, id);
+      const dir = join5(uploadDir, id);
       await mkdir(dir, { mode: 448 });
-      const path = join4(dir, safeName(name));
+      const path = join5(dir, safeName(name));
       const declared = Number(req.headers["content-length"] ?? "0");
       if (declared > maxUpload) throw new HttpError(413, "File is too large.");
       let received = 0;
@@ -4476,16 +4679,23 @@ async function serve(options) {
         received += chunk.length;
         if (received > maxUpload) req.destroy(new HttpError(413, "File is too large."));
       });
-      await pipeline(req, createWriteStream(path, { mode: 384 }));
+      try {
+        await pipeline(req, createWriteStream(path, { mode: 384 }));
+      } catch (error) {
+        await rm(dir, { recursive: true, force: true });
+        throw error;
+      }
       const kind = (await detectFile(path)).kind;
       const upload = { id, name, path, size: (await stat3(path)).size, kind };
-      uploads.set(id, upload);
       if (kind === "text") {
-        const result = await analyzeText2(name, await readFile4(path, "utf8"));
-        uploads.delete(id);
-        await rm(dir, { recursive: true, force: true });
-        return { upload: { id, name, size: upload.size, kind }, analyzed: result };
+        try {
+          const result = await analyzeText2(name, await readFile4(path, "utf8"));
+          return { upload: { id, name, size: upload.size, kind }, analyzed: result };
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
       }
+      uploads.set(id, upload);
       return { upload: { id, name, size: upload.size, kind } };
     },
     "POST /api/core": async (req) => {
@@ -4534,7 +4744,7 @@ async function serve(options) {
     },
     "POST /api/clear": async () => {
       analyzed.length = 0;
-      for (const upload of uploads.values()) await rm(dirname2(upload.path), { recursive: true, force: true });
+      for (const upload of uploads.values()) await rm(dirname3(upload.path), { recursive: true, force: true });
       uploads.clear();
       return {};
     }

@@ -4,7 +4,7 @@ const BANNER = "Traceback (most recent call last):";
 const FRAME = /^ {2}File "(.+)", line (\d+), in (.+)$/;
 const EXCEPTION = /^([A-Za-z_][\w.]*)(?:: ?(.*))?$/;
 /** Lines Python 3.11+ prints under code to point at the failing expression. */
-const MARKERS = /^\s*[~^\s]+$/;
+const MARKERS = /^[\s~^]+$/;
 const DIRECT_CAUSE = "The above exception was the direct cause of the following exception:";
 
 interface Block {
@@ -90,5 +90,5 @@ export function parsePython(text: string): ParsedFailure | null {
 }
 
 function isOwnPythonFile(file: string): boolean {
-  return !/(site-packages|dist-packages|\/lib\/python\d|^<frozen|^<string>)/.test(file);
+  return !/(site-packages|dist-packages|[\\/]lib[\\/]python\d|[\\/]python\d*[\\/]lib[\\/]|^<frozen|^<string>)/i.test(file);
 }

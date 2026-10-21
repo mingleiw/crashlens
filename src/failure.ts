@@ -66,8 +66,15 @@ export interface FailureLocation {
  */
 const PARSERS = [parseSanitizer, parsePython, parseJava, parseGo, parseRust, parseNode];
 
+/** Longer lines are cut before parsing: no real frame is this long, and it bounds regex work. */
+const MAX_LINE = 4096;
+
 export function parseFailure(text: string): Result<ParsedFailure> {
-  const normalized = text.replaceAll("\r\n", "\n");
+  const normalized = text
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .map((line) => (line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line))
+    .join("\n");
   for (const parse of PARSERS) {
     const parsed = parse(normalized);
     if (parsed !== null) return ok(parsed);

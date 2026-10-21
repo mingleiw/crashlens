@@ -3,7 +3,17 @@ import { failure, frame, lineStart, type FailureFrame, type ParsedFailure } from
 /** `TypeError: msg` or `Error [ERR_X]: msg`, directly followed by a stack frame. */
 const HEADER = /^([A-Z][\w$]*)(?: \[([\w$]+)\])?: (.*)\n\s+at /m;
 /** `at fn (file:1:2)`, `at file:1:2`, `at async fn (file:1:2)`, `at Array.map (<anonymous>)` */
-const FRAME = /^\s+at (?:async )?(?:(.+?) \((.*)\)|(.*))$/;
+const FRAME_START = /^\s+at (?:async )?/;
+
+/** Split a frame line without backtracking: `name (place)` or a bare place. */
+function frameParts(line: string): RegExpExecArray | null {
+  const start = FRAME_START.exec(line);
+  if (start === null) return null;
+  const rest = line.slice(start[0].length);
+  const open = rest.indexOf(" (");
+  const parts = (rest.endsWith(")") && open > 0 ? [rest, rest.slice(0, open), rest.slice(open + 2, -1), undefined] : [rest, undefined, undefined, rest]) as unknown as RegExpExecArray;
+  return parts;
+}
 const PLACE = /^(.*):(\d+):(\d+)$/;
 /** Node prints `file:line`, the source line and a caret above uncaught errors. */
 const SOURCE_PREAMBLE = /^(\S.*):(\d+)\n(.*)\n *\^+ *\n\n$/;
@@ -22,7 +32,7 @@ export function parseNode(text: string): ParsedFailure | null {
 
   const frames: FailureFrame[] = [];
   for (const line of text.slice(header.index).split("\n").slice(1)) {
-    const match = FRAME.exec(line);
+    const match = frameParts(line);
     if (match === null) break;
     const name = match[1] ?? null;
     const place = PLACE.exec(match[2] ?? match[3] ?? "");

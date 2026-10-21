@@ -5,7 +5,8 @@ const HEADER =
   /^(?:Exception in thread "([^"]*)" )?([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+)(?:: (.*))?\n\s+at /m;
 const CAUSED_BY = /^Caused by: ([a-zA-Z_$][\w$.]*)(?:: (.*))?$/;
 /** `at module@version/com.pkg.Class.method(File.java:12)` */
-const FRAME = /^\s+at (?:[\w.-]+(?:@[\w.-]+)?\/)?([\w$.<>/-]+)\(([^)]*)\)$/;
+/** `at app//com.pkg.Class.method(File.java:12)` too: Gradle and JUnit print a classloader name with two slashes. */
+const FRAME = /^\s+at (?:[\w.-]+(?:@[\w.-]+)?\/\/?)?([\w$.<>/-]+)\(([^)]*)\)$/;
 const MORE = /^\s+\.\.\. (\d+) more$/;
 
 interface Block {
@@ -31,8 +32,19 @@ export function parseJava(text: string): ParsedFailure | null {
   const blocks: Block[] = [
     { type: header[2] ?? "", message: header[3] ?? "", frames: [] },
   ];
+  let suppressed = false;
   for (const line of lines.slice(1)) {
     const current = blocks[blocks.length - 1] as Block;
+    // A "Suppressed:" exception (from try-with-resources) is indented, with its
+    // own frames and causes; it is not part of this stack.
+    if (/^\s+Suppressed: /.test(line)) {
+      suppressed = true;
+      continue;
+    }
+    if (suppressed) {
+      if (/^\s/.test(line)) continue;
+      suppressed = false;
+    }
     const at = FRAME.exec(line);
     if (at !== null) {
       current.frames.push(javaFrame(at[1] ?? "", at[2] ?? ""));

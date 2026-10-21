@@ -18,8 +18,9 @@ const GIT_TIMEOUT_MS = 5_000;
 
 const FENCE: Readonly<Record<string, string>> = {
   ".py": "python", ".java": "java", ".kt": "kotlin", ".js": "javascript", ".mjs": "javascript",
-  ".cjs": "javascript", ".ts": "typescript", ".go": "go", ".rs": "rust", ".c": "c", ".h": "c",
-  ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
+  ".cjs": "javascript", ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript", ".go": "go",
+  ".rs": "rust", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
+  ".rb": "ruby", ".php": "php", ".cs": "csharp", ".scala": "scala", ".swift": "swift",
 };
 
 export interface SourceSnippet {
@@ -58,7 +59,7 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
     const file = await resolveFile(realRoot, location, lookup);
     if (file === null) continue;
     if (traceFrames.length < MAX_TRACE_FRAMES)
-      traceFrames.push({ file, line: location.line, function: location.function });
+      traceFrames.push({ file, line: location.line, function: location.function, ...(location.column === undefined ? {} : { column: location.column }) });
     if (snippets.length >= MAX_SNIPPETS) continue;
     const key = `${file}:${location.line}`;
     if (seen.has(key)) continue;
@@ -122,8 +123,10 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
       first.push({ heading: "Where the bad value came from", kind: "list", items: trace.steps });
     for (const c of trace.code) first.push({ heading: c.heading, kind: "code", language: c.language, lines: c.lines });
   }
-  const prefixes = [`${realRoot}${sep}`, ...(isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep}`] : [])];
-  const shorten = (text: string) => prefixes.reduce((t, p) => t.replaceAll(p, ""), text);
+  // Only a real directory prefix, at the start of a path (after a space, quote or bracket).
+  const prefixes = [`${realRoot}${sep}`, ...(isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep}`] : [])].filter((p) => p !== sep);
+  const patterns = prefixes.map((p) => new RegExp(`(^|[\\s"'(\\[\`=])${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"));
+  const shorten = (text: string) => patterns.reduce((t, p) => t.replace(p, "$1"), text);
   return {
     ...issue,
     summary: shorten(issue.summary),
@@ -178,12 +181,18 @@ async function resolveFile(
   return null;
 }
 
-/** The real path of `candidate` if it is a regular file inside `root`. */
+/**
+ * The real path of `candidate` if it is a source file inside `root`. A stack
+ * frame is untrusted text (a pasted issue), so only files with a source-code
+ * extension outside dot directories are read: never `.env`, `.git/config`,
+ * keys or other dotfiles.
+ */
 async function inside(root: string, candidate: string): Promise<string | null> {
   try {
     const real = await realpath(candidate);
     const rel = relative(root, real);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+    if (FENCE[extname(real).toLowerCase()] === undefined || rel.split(sep).some((part) => part.startsWith("."))) return null;
     const info = await stat(real);
     return info.isFile() && info.size <= MAX_FILE_BYTES ? real : null;
   } catch {
@@ -243,7 +252,15 @@ function blame(root: string, file: string, line: number): Promise<Blame | null> 
   return new Promise((resolve) => {
     execFile(
       "git",
-      ["-C", root, "blame", "--porcelain", "-L", `${line},${line}`, "--", relative(root, file)],
+      [
+        // The repo may be untrusted: its config must not make git run anything.
+        // Blaming HEAD (not the work tree) avoids fsmonitor and clean filters;
+        // --no-textconv avoids diff drivers; hooks are disabled for good measure.
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-C", root,
+        "blame", "--porcelain", "--no-textconv", "-L", `${line},${line}`, "HEAD", "--", relative(root, file),
+      ],
       { timeout: GIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
       (error, stdout) => {
         if (error) {

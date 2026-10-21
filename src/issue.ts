@@ -44,6 +44,8 @@ export interface Issue {
 export interface IssueLocation {
   readonly file: string;
   readonly line: number;
+  /** 1-based column, when the runtime printed one (Node). */
+  readonly column?: number;
   readonly function: string;
   readonly own: boolean;
 }
@@ -112,8 +114,10 @@ export function renderIssueMarkdown(issue: Issue, depth = 0): string {
   ];
   for (const section of issue.sections) {
     lines.push(`${h(2)} ${section.heading}`, "");
-    if (section.kind === "code")
-      lines.push("```" + section.language, ...section.lines, "```", "");
+    if (section.kind === "code") {
+      const fence = fenceFor(section.lines);
+      lines.push(fence + section.language, ...section.lines, fence, "");
+    }
     else if (section.kind === "markdown") lines.push(section.markdown, "");
     else lines.push(...section.items.map((item) => `- ${item}`), "");
   }
@@ -162,6 +166,12 @@ export function withLog(issue: Issue, lines: readonly string[]): Issue {
       { heading: "Last log lines", kind: "code", language: "", lines },
     ],
   };
+}
+
+/** A code fence longer than any backtick run inside, so crash text cannot close it. */
+export function fenceFor(lines: readonly string[]): string {
+  const longest = Math.max(0, ...lines.map((line) => Math.max(0, ...(line.match(/`+/g) ?? []).map((run) => run.length))));
+  return "`".repeat(Math.max(3, longest + 1));
 }
 
 /** Table cells cannot contain raw pipes or newlines. */

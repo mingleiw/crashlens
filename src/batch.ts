@@ -44,7 +44,13 @@ type Candidate =
 /** Triage every core dump and panic log under a directory and group duplicates. */
 export async function triageBatch(options: BatchOptions): Promise<BatchResult> {
   const files = await listFiles(options.directory);
-  const candidates = await Promise.all(files.map(detect));
+  if (files.length > MAX_BATCH_FILES)
+    throw new Error(`${options.directory} has more than ${MAX_BATCH_FILES} files; point --batch at a smaller folder.`);
+  const candidates: Candidate[] = [];
+  await forEachLimit(files, 16, async (file) => {
+    candidates.push(await detect(file));
+  });
+  candidates.sort((a, b) => a.path.localeCompare(b.path));
   const issues: { file: string; issue: Issue }[] = [];
   const skipped: { file: string; reason: string }[] = [];
   const name = (path: string) => relative(options.directory, path) || path;
@@ -146,7 +152,7 @@ export function renderBatchMarkdown(result: BatchResult): string {
       `Files: ${shown.join(", ")}${more}`,
       "",
       "<details>",
-      `<summary>Full report for <code>${g.files[0]}</code></summary>`,
+      `<summary>Full report for <code>${escapeHtml(g.files[0] ?? "")}</code></summary>`,
       "",
       renderIssueMarkdown(g.issue, 2),
       "</details>",
@@ -207,4 +213,10 @@ async function forEachLimit<T>(
     }
   });
   await Promise.all(workers);
+}
+
+const MAX_BATCH_FILES = 10_000;
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }

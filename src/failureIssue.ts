@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+/** Last path element for POSIX and Windows paths alike, so signatures match across machines. */
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
 import type { FailureFrame, FailureLanguage, ParsedFailure } from "./failure.js";
 import type { Issue, IssueLocation, IssueSection } from "./issue.js";
 import { classifyFailure } from "./rules.js";
@@ -171,7 +174,7 @@ export function logContext(text: string, start: number): string[] {
   const lines = text
     .slice(0, start)
     .split("\n")
-    .map((line) => line.replace(/\s+$/, ""))
+    .map((line) => line.trimEnd())
     .filter((line) => line !== "");
   return lines.slice(-LOG_CONTEXT_LINES).map((line) => truncate(line, 300));
 }
@@ -182,6 +185,7 @@ function locations(failure: ParsedFailure): IssueLocation[] {
   return [...withFile.filter((f) => f.own), ...withFile.filter((f) => !f.own)].map((f) => ({
     file: f.file as string,
     line: f.line as number,
+    ...(f.column === null ? {} : { column: f.column }),
     function: f.function,
     own: f.own,
   }));

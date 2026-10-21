@@ -114,17 +114,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         received += chunk.length;
         if (received > maxUpload) req.destroy(new HttpError(413, "File is too large."));
       });
-      await pipeline(req, createWriteStream(path, { mode: 0o600 }));
+      try {
+        await pipeline(req, createWriteStream(path, { mode: 0o600 }));
+      } catch (error) {
+        await rm(dir, { recursive: true, force: true });
+        throw error;
+      }
       const kind = (await detectFile(path)).kind;
       const upload: Upload = { id, name, path, size: (await stat(path)).size, kind };
-      uploads.set(id, upload);
-      // Text logs are analyzed right away; cores wait for their binary.
+      // Text logs are analyzed right away and never kept; cores wait for their binary.
       if (kind === "text") {
-        const result = await analyzeText(name, await readFile(path, "utf8"));
-        uploads.delete(id);
-        await rm(dir, { recursive: true, force: true });
-        return { upload: { id, name, size: upload.size, kind }, analyzed: result };
+        try {
+          const result = await analyzeText(name, await readFile(path, "utf8"));
+          return { upload: { id, name, size: upload.size, kind }, analyzed: result };
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
       }
+      uploads.set(id, upload);
       return { upload: { id, name, size: upload.size, kind } };
     },
     "POST /api/core": async (req) => {

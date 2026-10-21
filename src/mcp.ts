@@ -241,6 +241,7 @@ async function callTool(name: string, args: Record<string, unknown>, options: Mc
       const binary = path("binary_path", true) as string;
       const name = args["function"];
       if (typeof name !== "string" || name.trim() === "") throw new ToolError("function is required.");
+      if (name.trim().startsWith("-")) throw new ToolError("function must be a name or address, not an option.");
       const match = /^(?:sub_|0x)([0-9a-f]+)$/i.exec(name.trim());
       // Link-time addresses map to Ghidra's space: PIE images load at 0x100000.
       const target = match === null ? name.trim() : BigInt(`0x${match[1]}`) + ((await isPositionIndependent(binary)) ? 0x100000n : 0n);
