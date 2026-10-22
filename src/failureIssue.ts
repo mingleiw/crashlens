@@ -186,6 +186,7 @@ function locations(failure: ParsedFailure): IssueLocation[] {
     file: f.file as string,
     line: f.line as number,
     ...(f.column === null ? {} : { column: f.column }),
+    ...(f.locals === undefined ? {} : { locals: f.locals }),
     function: f.function,
     own: f.own,
   }));

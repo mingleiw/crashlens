@@ -883,6 +883,79 @@ function isOwnPythonFile(file) {
   return !/(site-packages|dist-packages|[\\/]lib[\\/]python\d|[\\/]python\d*[\\/]lib[\\/]|^<frozen|^<string>)/i.test(file);
 }
 
+// src/parsers/pytest.ts
+var TEST_HEADER = /^_{3,} (.+?) _{3,}$/;
+var FRAME_SEPARATOR = /^(?:_ ){4,}_?\s*$/;
+var LOCATION = /^(\S[^:\n]*\.py):(\d+): ?(?:in (\S+))?.*$/;
+var ERROR_LINE = /^E\s+(.*)$/;
+var EXCEPTION2 = /^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warning|Failed)|[A-Z][A-Za-z]+Error)(?:: ?(.*))?$/;
+var LOCAL = /^([A-Za-z_]\w*)\s*= (.*)$/;
+function parsePytest(text) {
+  const lines = text.split("\n");
+  const header = lines.findIndex((line) => TEST_HEADER.test(line));
+  if (header === -1) return null;
+  let end = lines.findIndex((line, i) => i > header && (TEST_HEADER.test(line) || /^={3,}/.test(line)));
+  if (end === -1) end = lines.length;
+  const section = lines.slice(header + 1, end);
+  const blocks = [[]];
+  for (const line of section) {
+    if (FRAME_SEPARATOR.test(line)) blocks.push([]);
+    else blocks[blocks.length - 1].push(line);
+  }
+  const split = blocks.flatMap((block) => {
+    const starts = block.flatMap((line, i) => LOCATION.exec(line)?.[3] !== void 0 ? [i] : []);
+    if (starts.length < 2) return [block];
+    return starts.map((start, n) => block.slice(n === 0 ? 0 : start, starts[n + 1] ?? block.length));
+  });
+  const frames = [];
+  let errorType = null;
+  let message = "";
+  for (const block of split) {
+    const at = block.map((line) => LOCATION.exec(line)).find((m) => m !== null);
+    if (at === void 0 || at === null) continue;
+    const file = at[1];
+    const name = at[3] ?? /^\s*(?:async\s+)?def (\w+)\(/m.exec(block.join("\n"))?.[1] ?? "?";
+    const marked = block.find((line) => line.startsWith(">"));
+    const short = block.indexOf(at[0]);
+    const code2 = marked !== void 0 ? marked.slice(1).trim() : (block[short + 1] ?? "").trim() || null;
+    const locals = {};
+    for (const line of block) {
+      const local = LOCAL.exec(line);
+      if (local !== null) locals[local[1]] = local[2].trim();
+    }
+    const errors = block.map((line) => ERROR_LINE.exec(line)?.[1]).filter((line) => line !== void 0);
+    if (errors.length > 0) {
+      const first = errors.map((line) => EXCEPTION2.exec(line.trim())).find((m) => m !== null);
+      if (first !== void 0 && first !== null) {
+        errorType = first[1];
+        message = (first[2] ?? "").trim();
+      } else if (errorType === null) {
+        errorType = "AssertionError";
+        message = errors[0].trim();
+      }
+    }
+    frames.push(
+      frame({
+        function: name,
+        file,
+        line: Number(at[2]),
+        own: isOwnPythonFile(file),
+        code: code2,
+        ...Object.keys(locals).length === 0 ? {} : { locals }
+      })
+    );
+  }
+  if (frames.length === 0 || errorType === null) return null;
+  return failure({
+    language: "python",
+    header: "exception",
+    errorType,
+    message,
+    frames: frames.reverse(),
+    start: text.indexOf(lines[header])
+  });
+}
+
 // src/parsers/sanitizer.ts
 var REPORT = /^==\d+==(?:ERROR|WARNING): (\w+Sanitizer): (.+)$/m;
 var UBSAN = /^(.+?):(\d+):(\d+): runtime error: (.+)$/m;
@@ -972,6 +1045,41 @@ function sanitizerFrame(fn, place) {
   });
 }
 
+// src/parsers/sentry.ts
+var PLATFORM = { python: "python", node: "node", javascript: "node" };
+function parseSentry(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.includes('"exception"')) return null;
+  let event;
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  const language = PLATFORM[event.platform ?? ""];
+  const exception = event.exception?.values?.at(-1);
+  if (language === void 0 || exception === void 0) return null;
+  const frames = (exception.stacktrace?.frames ?? []).map(
+    (f) => frame({
+      function: f.function ?? "<anonymous>",
+      file: f.abs_path ?? f.filename ?? null,
+      line: f.lineno ?? null,
+      column: f.colno ?? null,
+      own: f.in_app !== false,
+      code: f.context_line?.trim() ?? null,
+      ...f.vars === void 0 ? {} : { locals: Object.fromEntries(Object.entries(f.vars).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)])) }
+    })
+  ).reverse();
+  return failure({
+    language,
+    header: "exception",
+    errorType: exception.type ?? "Error",
+    message: exception.value ?? "",
+    frames,
+    start: 0
+  });
+}
+
 // src/result.ts
 var ok = (value) => ({ ok: true, value });
 var err = (tag, message, detail) => ({
@@ -980,7 +1088,7 @@ var err = (tag, message, detail) => ({
 });
 
 // src/failure.ts
-var PARSERS = [parseSanitizer, parsePython, parseJava, parseGo, parseRust, parseNode];
+var PARSERS = [parseSentry, parseSanitizer, parsePytest, parsePython, parseJava, parseGo, parseRust, parseNode];
 var MAX_LINE = 4096;
 function parseFailure(text) {
   const normalized = text.replaceAll("\r\n", "\n").split("\n").map((line) => line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line).join("\n");
@@ -990,7 +1098,7 @@ function parseFailure(text) {
   }
   return err(
     "unsupported_crash",
-    "No supported failure found. crashlens reads Go/Rust panics, Python tracebacks, Java and Node stack traces, and AddressSanitizer/UBSan reports."
+    "No supported failure found. crashlens reads Go/Rust panics, Python tracebacks and pytest failures, Java and Node stack traces, Sentry event JSON, and AddressSanitizer/UBSan reports."
   );
 }
 function failure(fields) {
@@ -1784,6 +1892,7 @@ function locations(failure2) {
     file: f.file,
     line: f.line,
     ...f.column === null ? {} : { column: f.column },
+    ...f.locals === void 0 ? {} : { locals: f.locals },
     function: f.function,
     own: f.own
   }));
@@ -3152,10 +3261,33 @@ async function traceValue(kind, message, frames, root, allFiles) {
     const mismatch = await caseMismatch(frames, seeds, files, root, allFiles);
     if (mismatch !== null) hypotheses.push(mismatch);
   }
+  const readMatch = producer === null || element ? null : new RegExp(`^(${IDENT}(?:\\.${IDENT})*)\\s*(?:\\.get\\(\\s*["']([^"']+)["']|\\[\\s*["']([^"']+)["']\\s*\\])`).exec(producer.expr);
+  const containerOf = (expr) => /^(.*?)(?:\.[A-Za-z_$][\w$]*|\[\s*["'][^"']+["']\s*\])$/.exec(expr)?.[1] ?? null;
+  const read = readMatch !== null && producer !== null ? { container: readMatch[1], key: readMatch[2] ?? readMatch[3], frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr } : target.key !== null && kind === "python-key-error" ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${JSON.stringify(target.key)}]` } : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null ? { container: containerOf(target.expr), key: lastFieldName(target.expr), frame: 0, file: crash.file, index: crash.line - 1, text: target.expr } : null;
+  let runtimeMismatch = false;
+  if (read !== null) {
+    const actual = localValue(frames[read.frame]?.locals, read.container);
+    const keys = actual === null ? null : keysOf(actual);
+    if (actual !== null && keys !== null) {
+      const shown = `${c(read.container)} was ${c(maskValue(read.container, actual))}`;
+      if (!keys.has(read.key)) {
+        const near = [...keys].filter((k) => similar(k, read.key)).sort((a, b) => closeness(a, read.key) - closeness(b, read.key));
+        runtimeMismatch = near.length > 0;
+        hypotheses.unshift(
+          near.length > 0 ? `**Runtime value: wrong key.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}: it has ${c(near[0])}, not ${c(read.key)}.` : `**Runtime value: key missing.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}, with no ${c(read.key)}. Find out why the data lacks it before defaulting it.`
+        );
+      }
+    }
+  }
+  const printed = [.../* @__PURE__ */ new Set([target.root, ...names, ...read !== null && /^[A-Za-z_$][\w$]*$/.test(read.container) ? [read.container] : []])].flatMap((n) => {
+    const frame2 = frames.find((f) => f.locals?.[n] !== void 0);
+    return frame2 === void 0 ? [] : [`${c(n)} = ${c(maskValue(n, frame2.locals?.[n]))}`];
+  });
+  if (printed.length > 0) steps.push(`Values when it failed (printed by the failing run): ${printed.join(", ")}.`);
   const lastField = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(target.expr);
   const fieldTarget = fieldAccess && producer !== null && lastField !== null ? { field: lastField[1] ?? lastField[2], producer } : keyOwner;
   let payloadMismatch = false;
-  if (fieldTarget !== null) {
+  if (fieldTarget !== null && !runtimeMismatch) {
     const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
     if (origin !== null) {
       steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
@@ -3389,6 +3521,54 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
       }
   }
   return null;
+}
+function lastFieldName(expr) {
+  const m = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(expr);
+  return m === null ? null : m[1] ?? m[2];
+}
+function localValue(locals, expr) {
+  if (locals === void 0) return null;
+  const [root, ...path] = expr.split(".");
+  let value = locals[root];
+  if (value === void 0) return null;
+  for (const part of path) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed === null || typeof parsed !== "object" || !(part in parsed)) return null;
+      value = JSON.stringify(parsed[part]);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
+function keysOf(value) {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return new Set(Object.keys(parsed));
+  } catch {
+  }
+  const text = value.trim();
+  const open3 = text.indexOf(text.startsWith("{") ? "{" : "(");
+  if (open3 === -1 || !/^(?:\{|[A-Za-z_][\w.]*\()/.test(text)) return null;
+  const inner = balanced(text, open3);
+  if (inner === null) return null;
+  const keys = splitTopLevel(inner).flatMap((item) => {
+    const m = /^\s*(?:(['"])(.*?)\1\s*:|([A-Za-z_]\w*)\s*=)/.exec(item);
+    return m === null ? [] : [m[2] ?? m[3]];
+  });
+  return new Set(keys);
+}
+var SECRET_NAME = /pass(?:word|wd)?|secret|token|api[_-]?key|auth|cookie|session|credential|private|signature/i;
+var SECRET_VALUE = /(['"])(?:sk|pk|rk|ghp|gho|ghs|glpat|xox[abps]|AKIA|ASIA|eyJ)[\w.-]{6,}\1|(['"])[A-Za-z0-9+/=_-]{32,}\2/g;
+var MAX_VALUE = 200;
+function maskValue(name, value) {
+  if (SECRET_NAME.test(name)) return "***";
+  const masked = value.replace(
+    /((['"])([^'"]*)\2\s*:\s*|\b([A-Za-z_]\w*)\s*=\s*)(['"])(?:(?!\5).)*\5/g,
+    (whole, lead, _q, key, attr, quote) => SECRET_NAME.test(key ?? attr ?? "") ? `${lead}${quote}***${quote}` : whole
+  ).replace(SECRET_VALUE, (whole) => `${whole[0]}***${whole[0]}`);
+  return masked.length > MAX_VALUE ? `${masked.slice(0, MAX_VALUE - 1)}\u2026` : masked;
 }
 var NOT_PAYLOAD = /(?:^|[\\/])(?:package(?:-lock)?|tsconfig[\w.-]*|jsconfig|composer|\.?eslintrc[\w.-]*|renovate|lerna|turbo|vercel|firebase|app)\.json$|(?:^|[\\/])(?:docker-compose|\.?github|pnpm-lock|\.?gitlab-ci)[\w.-]*\.ya?ml$/;
 async function payloadKeys(allFiles, files, lang, skip) {
@@ -3738,7 +3918,13 @@ async function attachSource(issue, root) {
     const file = await resolveFile(realRoot, location, lookup);
     if (file === null) continue;
     if (traceFrames.length < MAX_TRACE_FRAMES)
-      traceFrames.push({ file, line: location.line, function: location.function, ...location.column === void 0 ? {} : { column: location.column } });
+      traceFrames.push({
+        file,
+        line: location.line,
+        function: location.function,
+        ...location.column === void 0 ? {} : { column: location.column },
+        ...location.locals === void 0 ? {} : { locals: location.locals }
+      });
     if (snippets.length >= MAX_SNIPPETS) continue;
     const key = `${file}:${location.line}`;
     if (seen.has(key)) continue;
@@ -3951,7 +4137,7 @@ var TOOLS = [
   {
     name: "analyze_failure",
     title: "Explain a panic, exception or sanitizer report",
-    description: "Turn failure output into a bug report: where it failed (first frame in the user's code), why, the log lines just before it, and next steps. Accepts Go/Rust panics, Python tracebacks (root cause of chained exceptions), Java and Node.js stack traces, and ASan/LSan/UBSan reports. Pass the output as `text` (for example a failing test run) or a saved log as `path`. Log noise around the failure is fine.",
+    description: "Turn failure output into a bug report: where it failed (first frame in the user's code), why, the log lines just before it, and next steps. Accepts Go/Rust panics, Python tracebacks (root cause of chained exceptions) and pytest failures (with frame variables from -l/--showlocals), Java and Node.js stack traces, Sentry event JSON, and ASan/LSan/UBSan reports. Pass the output as `text` (for example a failing test run) or a saved log as `path`. Log noise around the failure is fine.",
     inputSchema: {
       type: "object",
       properties: {

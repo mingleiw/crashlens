@@ -259,6 +259,69 @@
         }
       ],
       "symptom": "amountDue\\?\\.|\\?\\? ?0|\\|\\| ?0|if \\(!invoice|== null|=== undefined"
+    },
+    "pytest-camel": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "-m",
+        "pytest",
+        "-l",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "bug": "normalize() camelCases the row keys at runtime; receipt_line reads order.get(\"customer_id\"). Only visible in the runtime values (pytest --showlocals).",
+      "root": [
+        {
+          "file": "receipts.py",
+          "pattern": "customerId|totalCents"
+        },
+        {
+          "file": "export.py",
+          "pattern": "receipt_line\\(r\\)|normalize"
+        },
+        {
+          "file": "rows.py",
+          "pattern": "return (dict\\()?row|\\{k: v"
+        }
+      ],
+      "symptom": "if not customer|customer is None|or \"\"|\\.get\\(\"customer_id\", "
+    },
+    "pytest-prefix": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "-m",
+        "pytest",
+        "-l",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "bug": "config.load strips \"APP_\" from \"APP__DB_URL\", leaving \"_db_url\"; db reads settings[\"db_url\"]. Only visible in the runtime values.",
+      "root": [
+        {
+          "file": "config.py",
+          "pattern": "APP__\\\"|removeprefix\\(\"APP__\"\\)|\\[5:\\]|lstrip\\(\"_\"\\)|strip\\(\"_\"\\)"
+        }
+      ],
+      "symptom": "\\.get\\(\"db_url\"|\"db_url\" not in|except KeyError|sqlite"
+    },
+    "sentry-user": {
+      "heldout": true,
+      "run": [
+        "cat",
+        "sentry-event.json"
+      ],
+      "bug": "The Sentry event shows the request body has user_name; toProfile reads body.userName. Only visible in the event's frame variables.",
+      "root": [
+        {
+          "file": "mapper.js",
+          "pattern": "user_name"
+        }
+      ],
+      "symptom": "userName\\?\\.|\\|\\| ?[\"'`]|\\?\\? ?[\"'`]|if \\(!body\\.userName"
     }
   }
 }

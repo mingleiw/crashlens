@@ -15,6 +15,8 @@ export interface TraceFrame {
   readonly line: number;
   readonly function: string;
   readonly column?: number;
+  /** Local variables at the failure, when the output printed them (name to repr). */
+  readonly locals?: Readonly<Record<string, string>>;
 }
 
 export interface TraceCode {
@@ -268,6 +270,42 @@ export async function traceValue(
     if (mismatch !== null) hypotheses.push(mismatch);
   }
 
+  // Runtime values (pytest --showlocals, Sentry frame vars): put what the read expected next to what
+  // the variable actually held when it failed. Stronger than any static guess, so it goes first.
+  const readMatch = producer === null || element ? null : new RegExp(`^(${IDENT}(?:\\.${IDENT})*)\\s*(?:\\.get\\(\\s*["']([^"']+)["']|\\[\\s*["']([^"']+)["']\\s*\\])`).exec(producer.expr);
+  const containerOf = (expr: string) => /^(.*?)(?:\.[A-Za-z_$][\w$]*|\[\s*["'][^"']+["']\s*\])$/.exec(expr)?.[1] ?? null;
+  const read =
+    readMatch !== null && producer !== null
+      ? { container: readMatch[1] as string, key: (readMatch[2] ?? readMatch[3]) as string, frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr }
+      : target.key !== null && kind === "python-key-error"
+        ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${JSON.stringify(target.key)}]` }
+        : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null
+          ? { container: containerOf(target.expr) as string, key: lastFieldName(target.expr) as string, frame: 0, file: crash.file, index: crash.line - 1, text: target.expr }
+          : null;
+  let runtimeMismatch = false;
+  if (read !== null) {
+    const actual = localValue(frames[read.frame]?.locals, read.container);
+    const keys = actual === null ? null : keysOf(actual);
+    if (actual !== null && keys !== null) {
+      const shown = `${c(read.container)} was ${c(maskValue(read.container, actual))}`;
+      if (!keys.has(read.key)) {
+        const near = [...keys].filter((k) => similar(k, read.key)).sort((a, b) => closeness(a, read.key) - closeness(b, read.key));
+        runtimeMismatch = near.length > 0;
+        hypotheses.unshift(
+          near.length > 0
+            ? `**Runtime value: wrong key.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}: it has ${c(near[0] as string)}, not ${c(read.key)}.`
+            : `**Runtime value: key missing.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}, with no ${c(read.key)}. Find out why the data lacks it before defaulting it.`,
+        );
+      }
+    }
+  }
+  // The values of the traced variables, as printed by the failing run.
+  const printed = [...new Set([target.root, ...names, ...(read !== null && /^[A-Za-z_$][\w$]*$/.test(read.container) ? [read.container] : [])])].flatMap((n) => {
+    const frame = frames.find((f) => f.locals?.[n] !== undefined);
+    return frame === undefined ? [] : [`${c(n)} = ${c(maskValue(n, frame.locals?.[n] as string))}`];
+  });
+  if (printed.length > 0) steps.push(`Values when it failed (printed by the failing run): ${printed.join(", ")}.`);
+
   // The missing value is a field of data that came from somewhere (an API, a webhook, a file): find
   // where the field is set and which key of that data it reads, then check the repo's samples of the
   // data (JSON fixtures, schemas, JSON in code) for that key. Silent unless the key is absent and a
@@ -278,7 +316,7 @@ export async function traceValue(
       ? { field: (lastField[1] ?? lastField[2]) as string, producer }
       : keyOwner;
   let payloadMismatch = false;
-  if (fieldTarget !== null) {
+  if (fieldTarget !== null && !runtimeMismatch) {
     const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
     if (origin !== null) {
       steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
@@ -588,6 +626,67 @@ async function caseMismatch(
       }
   }
   return null;
+}
+
+function lastFieldName(expr: string): string | null {
+  const m = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(expr);
+  return m === null ? null : ((m[1] ?? m[2]) as string);
+}
+
+/** The printed value of `expr` (`order`, or `req.body` inside a JSON value) from a frame's locals. */
+function localValue(locals: Readonly<Record<string, string>> | undefined, expr: string): string | null {
+  if (locals === undefined) return null;
+  const [root, ...path] = expr.split(".");
+  let value = locals[root as string];
+  if (value === undefined) return null;
+  for (const part of path) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed === null || typeof parsed !== "object" || !(part in parsed)) return null;
+      value = JSON.stringify((parsed as Record<string, unknown>)[part]);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
+
+/** Top-level keys of a printed dict, JSON object or `Class(field=...)` repr; null if it is none of those. */
+function keysOf(value: string): Set<string> | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return new Set(Object.keys(parsed));
+  } catch {}
+  const text = value.trim();
+  const open = text.indexOf(text.startsWith("{") ? "{" : "(");
+  if (open === -1 || !/^(?:\{|[A-Za-z_][\w.]*\()/.test(text)) return null;
+  const inner = balanced(text, open);
+  if (inner === null) return null;
+  const keys = splitTopLevel(inner).flatMap((item) => {
+    const m = /^\s*(?:(['"])(.*?)\1\s*:|([A-Za-z_]\w*)\s*=)/.exec(item);
+    return m === null ? [] : [(m[2] ?? m[3]) as string];
+  });
+  return new Set(keys);
+}
+
+const SECRET_NAME = /pass(?:word|wd)?|secret|token|api[_-]?key|auth|cookie|session|credential|private|signature/i;
+/** Values that look like credentials whatever their key: provider prefixes and long random strings. */
+const SECRET_VALUE = /(['"])(?:sk|pk|rk|ghp|gho|ghs|glpat|xox[abps]|AKIA|ASIA|eyJ)[\w.-]{6,}\1|(['"])[A-Za-z0-9+/=_-]{32,}\2/g;
+const MAX_VALUE = 200;
+
+/**
+ * A printed value made safe to show: masked whole if its name looks secret,
+ * secret-looking keys and credential-shaped strings inside it masked, and cut
+ * to MAX_VALUE characters.
+ */
+export function maskValue(name: string, value: string): string {
+  if (SECRET_NAME.test(name)) return "***";
+  const masked = value
+    .replace(/((['"])([^'"]*)\2\s*:\s*|\b([A-Za-z_]\w*)\s*=\s*)(['"])(?:(?!\5).)*\5/g, (whole, lead: string, _q: string, key: string | undefined, attr: string | undefined, quote: string) =>
+      SECRET_NAME.test(key ?? attr ?? "") ? `${lead}${quote}***${quote}` : whole,
+    )
+    .replace(SECRET_VALUE, (whole) => `${whole[0]}***${whole[0]}`);
+  return masked.length > MAX_VALUE ? `${masked.slice(0, MAX_VALUE - 1)}…` : masked;
 }
 
 interface PayloadKey {

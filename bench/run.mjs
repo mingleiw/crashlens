@@ -57,7 +57,7 @@ for (const name of rescore === null ? selected : []) {
       const error = relative(crashed.stderr || crashed.stdout);
       let prompt = `My program crashed. Here is the error output:\n\n\`\`\`\n${error.trim()}\n\`\`\`\n`;
       if (cond === "B") {
-        const report = spawnSync(process.execPath, [cli, "-", "--source", dir], { input: crashed.stderr, encoding: "utf8" });
+        const report = spawnSync(process.execPath, [cli, "-", "--source", dir], { input: crashed.stderr || crashed.stdout, encoding: "utf8" });
         prompt += `\nHere is the crashlens report for this crash:\n\n\`\`\`markdown\n${relative(report.stdout).trim()}\n\`\`\`\n`;
       }
       prompt += "\nFix the bug. Edit the code directly; do not run anything.\n";

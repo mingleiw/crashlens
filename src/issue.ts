@@ -46,6 +46,8 @@ export interface IssueLocation {
   readonly line: number;
   /** 1-based column, when the runtime printed one (Node). */
   readonly column?: number;
+  /** Local variables the failure output printed for this frame (repr strings). */
+  readonly locals?: Readonly<Record<string, string>>;
   readonly function: string;
   readonly own: boolean;
 }

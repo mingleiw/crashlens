@@ -30,7 +30,7 @@ const TOOLS = [
     name: "analyze_failure",
     title: "Explain a panic, exception or sanitizer report",
     description:
-      "Turn failure output into a bug report: where it failed (first frame in the user's code), why, the log lines just before it, and next steps. Accepts Go/Rust panics, Python tracebacks (root cause of chained exceptions), Java and Node.js stack traces, and ASan/LSan/UBSan reports. Pass the output as `text` (for example a failing test run) or a saved log as `path`. Log noise around the failure is fine.",
+      "Turn failure output into a bug report: where it failed (first frame in the user's code), why, the log lines just before it, and next steps. Accepts Go/Rust panics, Python tracebacks (root cause of chained exceptions) and pytest failures (with frame variables from -l/--showlocals), Java and Node.js stack traces, Sentry event JSON, and ASan/LSan/UBSan reports. Pass the output as `text` (for example a failing test run) or a saved log as `path`. Log noise around the failure is fine.",
     inputSchema: {
       type: "object",
       properties: {

@@ -151,11 +151,11 @@ small crashing project twice: once with only the error output (A), once with
 the error output plus the crashlens report (B). Each diff is scored as a
 root-cause fix or a symptom guard.
 
-- **15 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+- **18 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
   id, a renamed field across a queue, an environment string used as a number,
   a missing `await`, a currency code two files away, shifted CSV columns, and
   data fields read under the wrong name (camelCase vs snake_case, a nested key).
-- **8 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+- **11 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
   were written before the check they test existed, with the bug one to three
   files from the crash and, in most, a misleading comment at the crash. The
   four payload cases were then used to fix one bug (a chained call split over
@@ -186,6 +186,13 @@ What we have seen so far:
   key) got 9/20 root-cause fixes; the report that names the key and the sample
   it is missing from got 20/20. In 6 of those runs the agent also kept a guard
   at the crash site.
+- **Runtime values:** on three held-out cases where the failure output already
+  printed the variables (pytest `--showlocals`, a Sentry event), the agent
+  fixed the real bug 5/5 without crashlens too: with the values on screen, it
+  reads them itself. The report's "runtime value" line changed nothing there
+  (turns 5.0 → 3.0 on one case, about even on the others). What it adds is
+  parsing pytest and Sentry output at all, masking secrets in what you paste
+  into an issue, and grouping test failures by signature.
 - **Native crashes:** the decoded core and pseudocode took the agent from 4
   turns to 1 and cut cost by about a third.
 - **Where it didn't help:** on single-file bugs the strong model was already
@@ -208,7 +215,12 @@ closed-channel misuse, stack overflow, explicit `panic(...)`
 
 **Python**: `None` used as a value, missing dict key, index errors, bad JSON,
 missing files, network errors, import errors, recursion, and chained exceptions
-(reports the root cause of `raise ... from e`)
+(reports the root cause of `raise ... from e`). pytest failure reports too
+(`--tb=auto`, `long`, `short`), with each frame's variables when run with
+`-l`/`--showlocals`.
+
+**Sentry events**: an exported event's JSON (Python and JavaScript), with each
+frame's variables.
 
 **Java**: NullPointerException (with the JVM's "because ... is null" detail),
 index out of bounds, bad casts, NumberFormatException,
@@ -249,6 +261,13 @@ and machines.
   field the producer spells differently from the consumer, columns zipped
   against a shifted slice, or an environment value used as a number. These
   come first in the report, labeled as hypotheses from a static reading.
+  When the code reads a field of incoming data under a name the project's data
+  samples (JSON fixtures, OpenAPI schemas) spell differently, it names both.
+- **Runtime values, when the output has them**: pytest `--showlocals` and
+  Sentry events print each frame's variables. crashlens puts the read next to
+  what the variable really held: "reads `order.get("customer_id")`, but `order`
+  was `{'customerId': 'c-7', ...}`". Values are cut to 200 characters, and
+  anything that looks like a password, token or key is masked as `***`.
 - **Native hypotheses**: a register holding a fill pattern (`0x4141…`) rather
   than a pointer, and a use after free visible in the decompiled caller
   (`free(p)` followed by a use of `p`), with the `memset` that overwrote it.

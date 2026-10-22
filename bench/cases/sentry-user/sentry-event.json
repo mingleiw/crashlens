@@ -1,0 +1,40 @@
+{
+  "event_id": "9f1c2b7e4d3a4f6b8c0d1e2f3a4b5c6d",
+  "platform": "node",
+  "level": "error",
+  "transaction": "POST /signup",
+  "exception": {
+    "values": [
+      {
+        "type": "TypeError",
+        "value": "Cannot read properties of undefined (reading 'split')",
+        "stacktrace": {
+          "frames": [
+            {
+              "filename": "handler.js",
+              "abs_path": "/srv/app/handler.js",
+              "function": "onSignup",
+              "lineno": 5,
+              "colno": 19,
+              "in_app": true,
+              "vars": {
+                "req": { "method": "POST", "path": "/signup", "body": { "user_name": "Ada Lovelace", "email": "ada@example.com", "invite_token": "inv_8c1d9f2a7b" } }
+              }
+            },
+            {
+              "filename": "mapper.js",
+              "abs_path": "/srv/app/mapper.js",
+              "function": "toProfile",
+              "lineno": 2,
+              "colno": 42,
+              "in_app": true,
+              "vars": {
+                "body": { "user_name": "Ada Lovelace", "email": "ada@example.com", "invite_token": "inv_8c1d9f2a7b" }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

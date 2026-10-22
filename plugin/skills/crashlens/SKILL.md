@@ -1,6 +1,6 @@
 ---
 name: crashlens
-description: Use this first, before reading crash output by hand, whenever something failed with a stack trace, panic, exception, sanitizer report, segfault or core dump: one call returns where it failed in the user's code, why, and a stable bug signature. Especially for many or large logs (a CI artifacts folder, a crash directory: it groups them into distinct bugs with counts in under a second, instead of grepping), noisy logs, and core dumps. Covers Go/Rust panics, Python tracebacks, Java and Node.js stack traces, ASan/LSan/UBSan reports and Linux core dumps.
+description: Use this first, before reading crash output by hand, whenever something failed with a stack trace, panic, exception, sanitizer report, segfault or core dump: one call returns where it failed in the user's code, why, and a stable bug signature. Especially for many or large logs (a CI artifacts folder, a crash directory: it groups them into distinct bugs with counts in under a second, instead of grepping), noisy logs, and core dumps. Covers Go/Rust panics, Python tracebacks and pytest failures, Java and Node.js stack traces, Sentry event JSON, ASan/LSan/UBSan reports and Linux core dumps.
 license: MIT
 compatibility: Text failures need only Node.js 22+. Core dumps need Linux x86-64, REA (npm install -g rea-agents) and REA_PWNTOOLS_PYTHON; gdb is optional.
 ---
@@ -44,7 +44,9 @@ are already the model reading the report.
 1. **Capture the whole failure.** Rerun the failing command with stderr
    included (`2>&1`) and give crashlens all of it, including the log lines
    before the trace: they show which request or input triggered it. For Rust,
-   set `RUST_BACKTRACE=1` first, or there is no stack.
+   set `RUST_BACKTRACE=1` first, or there is no stack. For pytest, add `-l`
+   (`--showlocals`): crashlens then compares what the code read with what the
+   variables really held.
 2. **Analyze** with the right tool above.
 3. **Read the report in this order:** "Hypotheses to check first" and "Where
    the bad value came from" when present (with `source_dir`), then the title

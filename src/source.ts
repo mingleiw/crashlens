@@ -59,7 +59,13 @@ export async function attachSource(issue: Issue, root: string): Promise<Issue> {
     const file = await resolveFile(realRoot, location, lookup);
     if (file === null) continue;
     if (traceFrames.length < MAX_TRACE_FRAMES)
-      traceFrames.push({ file, line: location.line, function: location.function, ...(location.column === undefined ? {} : { column: location.column }) });
+      traceFrames.push({
+        file,
+        line: location.line,
+        function: location.function,
+        ...(location.column === undefined ? {} : { column: location.column }),
+        ...(location.locals === undefined ? {} : { locals: location.locals }),
+      });
     if (snippets.length >= MAX_SNIPPETS) continue;
     const key = `${file}:${location.line}`;
     if (seen.has(key)) continue;

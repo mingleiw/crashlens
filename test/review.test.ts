@@ -290,3 +290,49 @@ describe("native hints", () => {
     assert.deepEqual(oneLine, []);
   });
 });
+
+describe("runtime values", () => {
+  it("masks secrets in printed values", async () => {
+    const { maskValue } = await import("../src/trace.js");
+    assert.equal(maskValue("api_token", "'abc'"), "***");
+    assert.equal(maskValue("cfg", "{'password': 'hunter2', 'host': 'db'}"), "{'password': '***', 'host': 'db'}");
+    assert.equal(maskValue("cfg", '{"session_id":"s1","user":"ada"}'), '{"session_id":"***","user":"ada"}');
+    assert.equal(maskValue("u", "User(name='ada', auth_key='k-1')"), "User(name='ada', auth_key='***')");
+    assert.equal(maskValue("h", "{'x': 'ghp_abcdefghijklmnop'}"), "{'x': '***'}");
+    assert.ok(maskValue("big", `'${"a".repeat(500)}'`).length <= 200);
+  });
+
+  it("parses pytest --tb=short output and runs without --showlocals", () => {
+    const short = [
+      "_________________________________ test_export _________________________________",
+      "test_export.py:6: in test_export",
+      "    assert export(rows) == []",
+      "export.py:6: in export",
+      "    return [receipt_line(normalize(r)) for r in rows]",
+      "receipts.py:4: in receipt_line",
+      "    return customer.upper()",
+      "E   AttributeError: 'NoneType' object has no attribute 'upper'",
+      "=========================== short test summary info ============================",
+    ].join("\n");
+    const parsed = parse(short);
+    assert.deepEqual(parsed.frames.map((f) => [f.function, f.file, f.line]), [["receipt_line", "receipts.py", 4], ["export", "export.py", 6], ["test_export", "test_export.py", 6]]);
+    assert.equal(parsed.errorType, "AttributeError");
+    assert.equal(parsed.frames[0]?.locals, undefined);
+  });
+
+  it("reads a pytest assertion failure as AssertionError", () => {
+    const text = [
+      "________________________________ test_total ________________________________",
+      "",
+      "    def test_total():",
+      ">       assert total([1, 2]) == 4",
+      "E       assert 3 == 4",
+      "E        +  where 3 = total([1, 2])",
+      "",
+      "test_total.py:2: AssertionError",
+    ].join("\n");
+    const parsed = parse(text);
+    assert.equal(parsed.errorType, "AssertionError");
+    assert.equal(parsed.message, "assert 3 == 4");
+  });
+});

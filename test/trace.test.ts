@@ -229,6 +229,55 @@ describe("value trace", () => {
     assert.match(hypotheses(md), /`displayName` is read from `raw\.displayName` at `user\.js:4`.*`display_name`/);
   });
 
+  it("reads pytest --showlocals output and shows the expected key next to the real value", async () => {
+    const root = project("pytest-locals", {
+      "receipts.py": ["def receipt_line(order):", '    customer = order.get("customer_id")', "    return customer.upper()"],
+      "test_r.py": ["from receipts import receipt_line", "def test_r():", '    assert receipt_line({"customerId": "c-7"})'],
+    });
+    const out = [
+      "=================================== FAILURES ===================================",
+      "____________________________________ test_r ____________________________________",
+      "",
+      "    def test_r():",
+      '>       assert receipt_line({"customerId": "c-7"})',
+      "",
+      "",
+      "test_r.py:3: ",
+      "_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ",
+      "",
+      "order = {'customerId': 'c-7', 'apiToken': 'sk-live-4f9a2c1e9b'}",
+      "",
+      "    def receipt_line(order):",
+      '        customer = order.get("customer_id")',
+      ">       return customer.upper()",
+      "E       AttributeError: 'NoneType' object has no attribute 'upper'",
+      "",
+      "customer   = None",
+      "order      = {'customerId': 'c-7', 'apiToken': 'sk-live-4f9a2c1e9b'}",
+      "",
+      "receipts.py:3: AttributeError",
+      "=========================== short test summary info ============================",
+    ].join("\n");
+    const md = await report(root, out);
+    assert.match(md, /Value was None in `receipt_line`/);
+    assert.match(hypotheses(md), /Runtime value: wrong key.*`order\.get\("customer_id"\)`.*it has `customerId`, not `customer_id`/);
+    assert.doesNotMatch(md, /sk-live/, "credentials in locals are masked");
+    assert.match(md, /'apiToken': '\*\*\*'/);
+  });
+
+  it("reads a Sentry event and its frame variables", async () => {
+    const root = project("sentry", { "mapper.js": ["function toProfile(body) {", '  return body.userName.split(" ");', "}"] });
+    const event = JSON.stringify({
+      platform: "node",
+      exception: { values: [{ type: "TypeError", value: "Cannot read properties of undefined (reading 'split')", stacktrace: { frames: [
+        { abs_path: "/srv/app/mapper.js", function: "toProfile", lineno: 2, colno: 24, in_app: true, vars: { body: { user_name: "Ada", password: "hunter2" } } },
+      ] } }] },
+    });
+    const md = await report(root, event);
+    assert.match(hypotheses(md), /`body\.userName`.*it has `user_name`, not `userName`/);
+    assert.doesNotMatch(md, /hunter2/);
+  });
+
   it("adds nothing when the source gives no lead", async () => {
     const root = project("plain", { "a.py": ["def f(x):", "    return x.name", "f(None)"] });
     const md = await report(root, [

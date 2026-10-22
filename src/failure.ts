@@ -1,8 +1,10 @@
 import { parseGo, parseRust } from "./parsers/goRust.js";
 import { parseJava } from "./parsers/java.js";
 import { parseNode } from "./parsers/node.js";
+import { parsePytest } from "./parsers/pytest.js";
 import { parsePython } from "./parsers/python.js";
 import { parseSanitizer } from "./parsers/sanitizer.js";
+import { parseSentry } from "./parsers/sentry.js";
 import { err, ok, type Result } from "./result.js";
 
 /** Failure output crashlens reads as text (everything except core dumps). */
@@ -19,6 +21,12 @@ export interface FailureFrame {
   readonly createdBy: boolean;
   /** Source line printed with the frame (Python, Node), if any. */
   readonly code: string | null;
+  /**
+   * Local variables at the failure, as the output printed them (pytest
+   * --showlocals, Sentry frame vars): name to repr. Values may hold secrets;
+   * show them only through `maskValue`.
+   */
+  readonly locals?: Readonly<Record<string, string>>;
 }
 
 /** A secondary stack, e.g. ASan's "freed by thread T0 here". */
@@ -64,7 +72,7 @@ export interface FailureLocation {
  * unambiguous banners, while Node's "TypeError: ..." line also appears at the
  * end of a Python traceback.
  */
-const PARSERS = [parseSanitizer, parsePython, parseJava, parseGo, parseRust, parseNode];
+const PARSERS = [parseSentry, parseSanitizer, parsePytest, parsePython, parseJava, parseGo, parseRust, parseNode];
 
 /** Longer lines are cut before parsing: no real frame is this long, and it bounds regex work. */
 const MAX_LINE = 4096;
@@ -81,7 +89,7 @@ export function parseFailure(text: string): Result<ParsedFailure> {
   }
   return err(
     "unsupported_crash",
-    "No supported failure found. crashlens reads Go/Rust panics, Python tracebacks, Java and Node stack traces, and AddressSanitizer/UBSan reports.",
+    "No supported failure found. crashlens reads Go/Rust panics, Python tracebacks and pytest failures, Java and Node stack traces, Sentry event JSON, and AddressSanitizer/UBSan reports.",
   );
 }
 

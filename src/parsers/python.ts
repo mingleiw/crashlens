@@ -89,6 +89,6 @@ export function parsePython(text: string): ParsedFailure | null {
   });
 }
 
-function isOwnPythonFile(file: string): boolean {
+export function isOwnPythonFile(file: string): boolean {
   return !/(site-packages|dist-packages|[\\/]lib[\\/]python\d|[\\/]python\d*[\\/]lib[\\/]|^<frozen|^<string>)/i.test(file);
 }
