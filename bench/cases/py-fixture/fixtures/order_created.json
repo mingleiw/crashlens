@@ -1,0 +1,6 @@
+{
+  "event": "order.created",
+  "orderId": "o-1077",
+  "shippingAddress": {"line1": "14 Strandgata", "city": "Tromsø", "postcode": "9008"},
+  "items": [{"sku": "lamp-02", "qty": 1}]
+}

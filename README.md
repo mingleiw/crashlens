@@ -53,13 +53,17 @@ this in **12 of 18 runs**:
 
 The crash is gone, and no customer ever gets a receipt again. The real bug is
 three files away: the API sends `customerId` and `models.py` reads
-`customer_id`. With the same error plus a crashlens report, which traces
-`customer` back to that lookup and says "the lookup found nothing, check the
+`customer_id`. With the same error plus a crashlens report, which traced
+`customer` back to that lookup and said "the lookup found nothing, check the
 key before guarding the crash site", **13 of 18 runs fixed `models.py`**.
+The report now goes one step further and names the field: `customer_ref` is
+read from `data.get("customer_id")` at `models.py:23`, and the project's data
+sample has `customerId` instead. With that, **5 of 5 runs fixed `models.py`**.
 
 | Benchmark ([bench/](#does-it-help-agents-benchmark)) | Without crashlens | With crashlens |
 | --- | --- | --- |
 | Misleading comment at the crash, bug 3 files away (18 runs) | 6/18 root-cause fixes | **13/18** |
+| A data field read under the wrong name, 4 new held-out cases (20 runs) | 5/20 (10/40 over two batches) | **20/20** (the previous report: 9/20) |
 | Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
 | Stripped binary + core dump: turns to the root cause | 4 | **1** |
 | Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
@@ -147,12 +151,15 @@ small crashing project twice: once with only the error output (A), once with
 the error output plus the crashlens report (B). Each diff is scored as a
 root-cause fix or a symptom guard.
 
-- **11 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+- **15 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
   id, a renamed field across a queue, an environment string used as a number,
-  a missing `await`, a currency code two files away, shifted CSV columns.
-- **4 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
-  were written after the report's checks were frozen, with the bug two or
-  three files from the crash and, in three, a misleading comment at the crash.
+  a missing `await`, a currency code two files away, shifted CSV columns, and
+  data fields read under the wrong name (camelCase vs snake_case, a nested key).
+- **8 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+  were written before the check they test existed, with the bug one to three
+  files from the crash and, in most, a misleading comment at the crash. The
+  four payload cases were then used to fix one bug (a chained call split over
+  lines), so they are not fully held out any more.
 
 ```bash
 npm run build
@@ -174,6 +181,11 @@ What we have seen so far:
 - **Smaller model:** without the report it guarded the crash site on the
   case-mismatch bug every time; with it, 21/21 runs on the first 7 cases fixed
   the root cause.
+- **Naming the field:** on four cases where code reads a payload key under the
+  wrong name, the previous report (which traced the value but did not name the
+  key) got 9/20 root-cause fixes; the report that names the key and the sample
+  it is missing from got 20/20. In 6 of those runs the agent also kept a guard
+  at the crash site.
 - **Native crashes:** the decoded core and pseudocode took the agent from 4
   turns to 1 and cut cost by about a third.
 - **Where it didn't help:** on single-file bugs the strong model was already
@@ -467,7 +479,8 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [x] Stripped binaries: names from unwind tables, function disassembly, REA + Ghidra pseudocode
 - [x] Trace the bad value to where it was produced, with named hypotheses (Python, JavaScript)
 - [x] A/B benchmark for coding agents (`bench/`)
-- [ ] Value tracing for Java, Go and Rust; follow values through object fields and config objects
+- [x] Follow a field to where it is set and check its key against the project's data samples
+- [ ] Value tracing for Java, Go and Rust; follow values through config objects
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)

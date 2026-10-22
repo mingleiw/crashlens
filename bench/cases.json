@@ -195,6 +195,70 @@
         }
       ],
       "symptom": "isinstance|except TypeError"
+    },
+    "py-fixture": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "main.py"
+      ],
+      "bug": "The webhook payload sends shippingAddress; Order.from_payload reads shipping_address. Two files from the crash, with a comment saying some orders have no address.",
+      "root": [
+        {
+          "file": "models.py",
+          "pattern": "shippingAddress"
+        }
+      ],
+      "symptom": "address is None|if not order\\.address|order\\.address or|\\.get\\(.line1|address = .* or \\{"
+    },
+    "js-user": {
+      "heldout": true,
+      "run": [
+        "node",
+        "app.js"
+      ],
+      "bug": "The API returns display_name; the User constructor reads raw.displayName. Two files from the crash, with a comment saying invited users have no display name.",
+      "root": [
+        {
+          "file": "user.js",
+          "pattern": "display_name"
+        },
+        {
+          "file": "api.js",
+          "pattern": "displayName"
+        }
+      ],
+      "symptom": "displayName\\?\\.|\\|\\| ?[\"'`]|\\?\\? ?[\"'`]|if \\(!user\\.displayName"
+    },
+    "py-nested": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "main.py"
+      ],
+      "bug": "The signup event has user.emailAddress; parse_signup reads user.get(\"email\"). Two files from the crash, with a comment saying some providers share no email.",
+      "root": [
+        {
+          "file": "events.py",
+          "pattern": "emailAddress"
+        }
+      ],
+      "symptom": "if not (?:profile|email)\\b|profile\\.get\\(\"email\"\\)|\\bor \"\"|is None"
+    },
+    "js-openapi": {
+      "heldout": true,
+      "run": [
+        "node",
+        "app.js"
+      ],
+      "bug": "The API (openapi.yaml and the mock) returns amount_due; toInvoice reads body.amountDue. One file from the crash, with a comment saying drafts have no amount.",
+      "root": [
+        {
+          "file": "invoice.js",
+          "pattern": "amount_due"
+        }
+      ],
+      "symptom": "amountDue\\?\\.|\\?\\? ?0|\\|\\| ?0|if \\(!invoice|== null|=== undefined"
     }
   }
 }

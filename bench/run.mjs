@@ -9,6 +9,7 @@
 //
 //   npm run build && node bench/run.mjs [--model haiku] [--reps 3] [--cases js-await,py-queue] [--out DIR]
 //   node bench/run.mjs --rescore DIR    # rescore saved runs after editing cases.json
+//   CRASHLENS_CLI=/path/to/other/dist/src/cli.js node bench/run.mjs ...   # benchmark another build
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -17,7 +18,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = resolve(here, "../dist/src/cli.js");
+// CRASHLENS_CLI points at another build, to compare versions on the same cases.
+const cli = process.env.CRASHLENS_CLI ?? resolve(here, "../dist/src/cli.js");
 const { cases } = JSON.parse(readFileSync(join(here, "cases.json"), "utf8"));
 
 const args = process.argv.slice(2);

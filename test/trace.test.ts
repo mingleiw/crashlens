@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { parseFailure } from "../src/failure.js";
 import { toFailureIssue } from "../src/failureIssue.js";
@@ -16,7 +16,10 @@ after(() => rmSync(work, { recursive: true, force: true }));
 function project(name: string, files: Record<string, string[]>): string {
   const dir = join(work, name);
   mkdirSync(dir, { recursive: true });
-  for (const [file, lines] of Object.entries(files)) writeFileSync(join(dir, file), lines.join("\n"));
+  for (const [file, lines] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), lines.join("\n"));
+  }
   return dir;
 }
 
@@ -165,6 +168,65 @@ describe("value trace", () => {
     assert.match(md, /`rows` is assigned at `main\.py:2`/);
     assert.match(hypotheses(md), /Columns shifted.*`zip\(header, v\[1:\]\)` at `loader\.py:3`.*`qty`/);
     assert.doesNotMatch(md, /lookup key/);
+  });
+
+  it("names the payload key a model reads under the wrong name", async () => {
+    const files = {
+      "fixtures/order.json": ['{"orderId": "o-1", "shippingAddress": {"line1": "1 Main St"}}'],
+      "models.py": [
+        "class Order:",
+        "    def __init__(self, id, address):",
+        "        self.id = id",
+        "        self.address = address",
+        "    @classmethod",
+        "    def from_payload(cls, payload):",
+        '        return cls(id=payload.get("orderId"), address=payload.get("shipping_address"))',
+      ],
+      "app.py": ["import json", "from models import Order", "def label(order):", "    return order.address['line1']", "order = Order.from_payload(json.load(open('fixtures/order.json')))", "label(order)"],
+    };
+    const trace = (root: string) => [
+      "Traceback (most recent call last):",
+      `  File "${root}/app.py", line 6, in <module>`,
+      "    label(order)",
+      `  File "${root}/app.py", line 4, in label`,
+      "    return order.address['line1']",
+      "TypeError: 'NoneType' object is not subscriptable",
+    ].join("\n");
+    const root = project("payload", files);
+    const md = await report(root, trace(root));
+    assert.match(hypotheses(md), /Field name mismatch.*`address` is read from `payload\.get\("shipping_address"\)` at `models\.py:7`.*no data sample in the project has `shipping_address`; it has `shippingAddress` \(`fixtures\/order\.json:1`\)/);
+    assert.doesNotMatch(md, /lookup found nothing/, "the order exists; only its field is missing");
+
+    // The key is in the data (just empty this time): no mismatch to report.
+    const present = project("payload-present", { ...files, "fixtures/order.json": ['{"orderId": "o-1", "shipping_address": null}'] });
+    assert.doesNotMatch(await report(present, trace(present)), /Field name mismatch/);
+    // No sample of the data in the repo: nothing to compare with, so say nothing.
+    const { ["fixtures/order.json"]: _sample, ...withoutSample } = files;
+    const unknown = project("payload-unknown", withoutSample);
+    assert.doesNotMatch(await report(unknown, trace(unknown)), /Field name mismatch/);
+  });
+
+  it("follows a field set in a JS constructor and a chained call split over lines", async () => {
+    const root = project("payload-js", {
+      "fixtures/user.json": ['{ "id": 3, "display_name": "Ada" }'],
+      "user.js": ["class User {", "  constructor(raw) {", "    this.id = raw.id;", "    this.displayName = raw.displayName;", "  }", "}", "module.exports = { User };"],
+      "app.js": [
+        'const { User } = require("./user");',
+        "function initials(user) {",
+        "  return user.displayName",
+        '    .split(" ")',
+        "    .join(\"\");",
+        "}",
+        'initials(new User(require("./fixtures/user.json")));',
+      ],
+    });
+    const md = await report(root, [
+      "TypeError: Cannot read properties of undefined (reading 'split')",
+      `    at initials (${root}/app.js:4:6)`,
+      `    at Object.<anonymous> (${root}/app.js:7:1)`,
+    ].join("\n"));
+    assert.match(md, /The bad value is `user\.displayName`/);
+    assert.match(hypotheses(md), /`displayName` is read from `raw\.displayName` at `user\.js:4`.*`display_name`/);
   });
 
   it("adds nothing when the source gives no lead", async () => {

@@ -1,0 +1,17 @@
+openapi: 3.0.3
+info:
+  title: Billing API
+  version: 1.4.0
+components:
+  schemas:
+    Invoice:
+      type: object
+      properties:
+        invoice_id:
+          type: string
+        amount_due:
+          type: integer
+          description: Amount in cents
+        due_date:
+          type: string
+          format: date

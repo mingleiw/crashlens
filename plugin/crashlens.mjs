@@ -2985,6 +2985,7 @@ var LANG = {
   ".jsx": "js"
 };
 var MAX_BODY_LINES = 25;
+var MAX_CLASS_LINES = 300;
 var MAX_SCANNED_FILES = 3e3;
 var MAX_FILE_BYTES = 1024 * 1024;
 var IDENT = "[A-Za-z_$][\\w$]*";
@@ -3039,7 +3040,11 @@ async function traceValue(kind, message, frames, root, allFiles) {
     }
     return hypotheses.length + steps.length === 0 ? null : { hypotheses, steps, code: code2 };
   }
-  const target = targetOf(kind, message, crashLine, crash.column);
+  const crashLines = await files.lines(crash.file) ?? [];
+  let joined = crashLine;
+  for (let i = crash.line - 2; i >= Math.max(0, crash.line - 5) && /^\s*\??\./.test(joined); i--)
+    joined = `${(crashLines[i] ?? "").trim()}${joined.trim()}`;
+  const target = targetOf(kind, message, joined, joined === crashLine ? crash.column : void 0);
   if (target === null) return null;
   steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
   const follow = async (start, from) => {
@@ -3094,10 +3099,12 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const chain = target.expr.endsWith(")") ? { name: target.expr, names: /* @__PURE__ */ new Set(), frame: 0, producer: { file: crash.file, index: crash.line - 1, expr: target.expr }, element: false } : await follow(target.root, 0);
   const { name, names, producer } = chain;
   const element = producer?.element === true;
+  const fieldAccess = target.expr !== target.root && !target.expr.endsWith(")");
   const seeds = [];
+  let keyOwner = null;
   const call = producer === null ? null : callee(producer.expr);
   const def = call === null || producer === null ? null : await files.definition(call.short, call.module, producer.file, lang, allFiles);
-  const isLookup = producer !== null && !element && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || def !== null && LOOKUP.test(def.lines.join("\n")));
+  const isLookup = producer !== null && !element && !fieldAccess && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || def !== null && LOOKUP.test(def.lines.join("\n")));
   const key = producer === null || !isLookup ? null : lookupKey(producer.expr);
   if (producer !== null && key !== null) {
     const simple = new RegExp(`^${IDENT}$`).test(key);
@@ -3108,6 +3115,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
     const member = expr === null ? null : new RegExp(`^(${IDENT})\\.(${IDENT})$`).exec(expr);
     if (literal === null && member !== null && from !== null) {
       const owner = await follow(member[1], simple ? Math.max(keyChain?.frame ?? 0, 0) : chain.frame);
+      if (owner.producer !== null) keyOwner = { field: member[2], producer: owner.producer };
       const objectText = owner.producer?.expr ?? "";
       const field = new RegExp(`^\\{.*\\b${member[2]}\\s*:\\s*((["'])[^"'\\n]*\\2)`).exec(objectText);
       if (owner.producer !== null && field !== null)
@@ -3128,7 +3136,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
         );
       else if (isLookup && LOOKUP.test(def.lines.join("\n")))
         hypotheses.push(
-          `**The lookup found nothing.** ${c(def.name)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
+          `**The lookup found nothing.** ${c(call.module === null ? def.name : `${call.module}.${def.name}`)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
         );
       const shifted = zipShift(def);
       if (shifted !== null)
@@ -3144,16 +3152,38 @@ async function traceValue(kind, message, frames, root, allFiles) {
     const mismatch = await caseMismatch(frames, seeds, files, root, allFiles);
     if (mismatch !== null) hypotheses.push(mismatch);
   }
+  const lastField = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(target.expr);
+  const fieldTarget = fieldAccess && producer !== null && lastField !== null ? { field: lastField[1] ?? lastField[2], producer } : keyOwner;
+  let payloadMismatch = false;
+  if (fieldTarget !== null) {
+    const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
+    if (origin !== null) {
+      steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
+      const data = await payloadKeys(await allFiles(), files, lang, origin);
+      const exact = data.some((k) => k.key === origin.key);
+      const near = exact ? [] : data.filter((k) => similar(k.key, origin.key)).sort((a, b) => closeness(a.key, origin.key) - closeness(b.key, origin.key));
+      if (near.length > 0) {
+        payloadMismatch = true;
+        const shown = unique(near.map((k) => k.key)).slice(0, 2).map((key2) => {
+          const first = near.find((k) => k.key === key2);
+          return `${c(key2)} (${at(first.file, first.index)})`;
+        });
+        hypotheses.unshift(
+          `**Field name mismatch.** ${c(fieldTarget.field)} is read from ${c(origin.read)} at ${at(origin.file, origin.index)}, but no data sample in the project has ${c(origin.key)}; it has ${shown.join(" and ")}. If that is this data, read the key it actually uses rather than defaulting the missing value.`
+        );
+      }
+    }
+  }
   const selfRooted = ["this", "self"].includes(target.root);
   const external = producer !== null && EXTERNAL.test(producer.expr);
   const fieldNames = new Set([...names].filter((n) => n !== "this" && n !== "self"));
-  const builder = target.key === null || selfRooted || external ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
+  const builder = target.key === null || selfRooted || external || payloadMismatch ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
   const builderNear = builder === null ? [] : builder.keys.filter((k) => similar(k, target.key));
   if (builder !== null && builderNear.length > 0) {
     hypotheses.push(
       `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
     );
-  } else if (target.key !== null && !selfRooted && !external) {
+  } else if (target.key !== null && !selfRooted && !external && !payloadMismatch) {
     const keys = await writtenKeys(await allFiles(), files, lang);
     const exact = keys.filter((k) => k.key === target.key);
     const near = keys.filter((k) => k.key !== target.key && similar(k.key, target.key));
@@ -3360,6 +3390,28 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
   }
   return null;
 }
+var NOT_PAYLOAD = /(?:^|[\\/])(?:package(?:-lock)?|tsconfig[\w.-]*|jsconfig|composer|\.?eslintrc[\w.-]*|renovate|lerna|turbo|vercel|firebase|app)\.json$|(?:^|[\\/])(?:docker-compose|\.?github|pnpm-lock|\.?gitlab-ci)[\w.-]*\.ya?ml$/;
+async function payloadKeys(allFiles, files, lang, skip) {
+  const out = [];
+  for (const file of allFiles.slice(0, MAX_SCANNED_FILES)) {
+    const ext = extname(file).toLowerCase();
+    const isData = ext === ".json" || ext === ".yaml" || ext === ".yml";
+    if (!isData && LANG[ext] !== lang) continue;
+    if (isData && NOT_PAYLOAD.test(file)) continue;
+    const lines = await files.lines(file);
+    if (lines === null) continue;
+    const pattern = ext === ".yaml" || ext === ".yml" ? /^\s*-?\s*["']?([A-Za-z_][\w-]*)["']?\s*:/g : /["']([A-Za-z_][\w-]*)["']\s*:/g;
+    lines.forEach((line, index) => {
+      if (file === skip.file && index === skip.index) return;
+      for (const m of line.matchAll(pattern)) out.push({ key: m[1], file, index });
+    });
+  }
+  return out;
+}
+function closeness(a, b) {
+  const norm = (s) => s.toLowerCase().replace(/[_-]/g, "");
+  return norm(a) === norm(b) ? 0 : norm(a).startsWith(norm(b)) || norm(b).startsWith(norm(a)) ? 1 : 2;
+}
 async function writtenKeys(allFiles, files, lang) {
   const patterns = lang === "python" ? [/["'](\w+)["']\s*:/g, /\[\s*["'](\w+)["']\s*\]\s*=(?!=)/g, /\b(\w+)\s*=(?!=)[^,)]*[,)]/g] : [/["']?([A-Za-z_$][\w$]*)["']?\s*:(?!:)/g, /\.([A-Za-z_$][\w$]*)\s*=(?!=)/g];
   const out = [];
@@ -3513,7 +3565,7 @@ var Files = class {
   async definition(name, module, near, lang, allFiles) {
     let order;
     if (module !== null) {
-      const file = await this.moduleFile(module, near, lang, allFiles);
+      const file = await this.moduleFile(module, near, lang, allFiles) ?? await this.importedFrom(module, near, lang, allFiles) ?? null;
       order = file === null ? [] : [file];
     } else {
       const imported = await this.importedFrom(name, near, lang, allFiles);
@@ -3534,6 +3586,65 @@ var Files = class {
     }
     return matches[0] ?? null;
   }
+  /**
+   * Where `field` of the value `producer` returns is set, and the key of the
+   * incoming data it reads: `address=payload.get("shipping_address")` in the
+   * called function, `this.displayName = raw.displayName` in the constructed
+   * class, `amountDue: body.amountDue` in a mapper's object literal.
+   */
+  async fieldOrigin(field, producer, lang, allFiles) {
+    const call = callee(producer.expr);
+    if (call === null) return null;
+    const regions = [];
+    const def = await this.definition(call.short, call.module, producer.file, lang, allFiles);
+    if (def !== null) regions.push({ file: def.file, start: def.start, lines: def.lines });
+    const className = call.module !== null && /^[A-Z]/.test(call.module) ? call.module : /^[A-Z]/.test(call.short) ? call.short : null;
+    if (className !== null) {
+      const cls = await this.classRegion(className, producer.file, lang, allFiles);
+      if (cls !== null) regions.push(cls);
+    }
+    const f = escape(field);
+    const source = `(${IDENT}(?:\\.${IDENT})*)`;
+    const patterns = lang === "python" ? [
+      new RegExp(`(?:^|[\\s(,])(?:self\\.)?${f}\\s*=(?!=)\\s*(${source}\\.get\\(\\s*["']([^"']+)["'][^)]*\\))`),
+      new RegExp(`(?:^|[\\s(,])(?:self\\.)?${f}\\s*=(?!=)\\s*(${source}\\[\\s*["']([^"']+)["']\\s*\\])`),
+      new RegExp(`["']${f}["']\\s*:\\s*(${source}\\.get\\(\\s*["']([^"']+)["'][^)]*\\))`),
+      new RegExp(`["']${f}["']\\s*:\\s*(${source}\\[\\s*["']([^"']+)["']\\s*\\])`)
+    ] : [
+      new RegExp(`\\bthis\\.${f}\\s*=(?!=)\\s*(${IDENT}\\??\\.(${IDENT}))\\b(?!\\s*[(.])`),
+      new RegExp(`\\bthis\\.${f}\\s*=(?!=)\\s*(${IDENT}\\[\\s*["']([^"']+)["']\\s*\\])`),
+      new RegExp(`(?:^|[{,\\s])["']?${f}["']?\\s*:\\s*(${IDENT}\\??\\.(${IDENT}))\\b(?!\\s*[(.])`),
+      new RegExp(`(?:^|[{,\\s])["']?${f}["']?\\s*:\\s*(${IDENT}\\[\\s*["']([^"']+)["']\\s*\\])`)
+    ];
+    for (const region of regions)
+      for (let i = 0; i < region.lines.length; i++)
+        for (const p of patterns) {
+          const m = p.exec(region.lines[i]);
+          if (m === null) continue;
+          const key = lang === "python" ? m[3] : m[2];
+          return { key, read: m[1].trim(), file: region.file, index: region.start + i };
+        }
+    return null;
+  }
+  /** The body of `class name`, from the file `near` imports it from, `near` itself, or the one file that defines it. */
+  async classRegion(name, near, lang, allFiles) {
+    const imported = await this.importedFrom(name, near, lang, allFiles);
+    const head = new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?class\\s+${escape(name)}\\b`);
+    const candidates = imported === void 0 ? [near] : imported === null ? [] : [imported];
+    if (imported === void 0) {
+      const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang && f !== near).slice(0, MAX_SCANNED_FILES);
+      const defining = [];
+      for (const file of all) if ((await this.lines(file))?.some((l) => head.test(l))) defining.push(file);
+      if (defining.length === 1) candidates.push(defining[0]);
+    }
+    for (const file of candidates) {
+      const lines = await this.lines(file);
+      const start = lines?.findIndex((l) => head.test(l)) ?? -1;
+      if (lines === null || start === -1) continue;
+      return { file, start, lines: body(lines, start, lang, MAX_CLASS_LINES) };
+    }
+    return null;
+  }
   async defineIn(file, name, lang) {
     if (!file.startsWith(this.root)) return null;
     const lines = await this.lines(file);
@@ -3550,11 +3661,11 @@ var Files = class {
     };
   }
 };
-function body(lines, start, lang) {
+function body(lines, start, lang, cap = MAX_BODY_LINES) {
   const out = [lines[start] ?? ""];
   if (lang === "python") {
     const indent = /^\s*/.exec(out[0])?.[0].length ?? 0;
-    for (let i = start + 1; i < lines.length && out.length < MAX_BODY_LINES; i++) {
+    for (let i = start + 1; i < lines.length && out.length < cap; i++) {
       const line = lines[i] ?? "";
       if (line.trim() !== "" && (/^\s*/.exec(line)?.[0].length ?? 0) <= indent) break;
       out.push(line);
@@ -3564,7 +3675,7 @@ function body(lines, start, lang) {
   }
   let depth = 0;
   let opened = false;
-  for (let i = start; i < lines.length && out.length <= MAX_BODY_LINES; i++) {
+  for (let i = start; i < lines.length && out.length <= cap; i++) {
     const line = lines[i] ?? "";
     if (i > start) out.push(line);
     for (const c2 of line) {

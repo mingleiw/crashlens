@@ -35,6 +35,7 @@ const LANG: Readonly<Record<string, Lang>> = {
   ".py": "python", ".js": "js", ".mjs": "js", ".cjs": "js", ".ts": "js", ".tsx": "js", ".jsx": "js",
 };
 const MAX_BODY_LINES = 25;
+const MAX_CLASS_LINES = 300;
 const MAX_SCANNED_FILES = 3_000;
 const MAX_FILE_BYTES = 1024 * 1024;
 const IDENT = "[A-Za-z_$][\\w$]*";
@@ -127,7 +128,13 @@ export async function traceValue(
     return hypotheses.length + steps.length === 0 ? null : { hypotheses, steps, code };
   }
 
-  const target = targetOf(kind, message, crashLine, crash.column);
+  // A chained call split over lines (`user.displayName` then `.split(" ")` below it):
+  // the runtime reports the `.split` line, so join it to the lines above it.
+  const crashLines = (await files.lines(crash.file)) ?? [];
+  let joined = crashLine;
+  for (let i = crash.line - 2; i >= Math.max(0, crash.line - 5) && /^\s*\??\./.test(joined); i--)
+    joined = `${(crashLines[i] ?? "").trim()}${joined.trim()}`;
+  const target = targetOf(kind, message, joined, joined === crashLine ? crash.column : undefined);
   if (target === null) return null;
   steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
 
@@ -194,13 +201,16 @@ export async function traceValue(
     : await follow(target.root, 0);
   const { name, names, producer } = chain;
   const element = producer?.element === true;
+  // `order.address` or `profile["email"]` is missing, not `order`: the object exists, a field of it is empty.
+  const fieldAccess = target.expr !== target.root && !target.expr.endsWith(")");
 
   // For a lookup, follow the key back too: its value is what failed to match.
   const seeds: Literal[] = [];
+  let keyOwner: { field: string; producer: Producer } | null = null;
   const call = producer === null ? null : callee(producer.expr);
   const def = call === null || producer === null ? null : await files.definition(call.short, call.module, producer.file, lang, allFiles);
   const isLookup =
-    producer !== null && !element && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || (def !== null && LOOKUP.test(def.lines.join("\n"))));
+    producer !== null && !element && !fieldAccess && NIL_KINDS.has(kind) && (LOOKUP.test(producer.expr) || (def !== null && LOOKUP.test(def.lines.join("\n"))));
   const key = producer === null || !isLookup ? null : lookupKey(producer.expr);
   if (producer !== null && key !== null) {
     const simple = new RegExp(`^${IDENT}$`).test(key);
@@ -212,6 +222,7 @@ export async function traceValue(
     const member = expr === null ? null : new RegExp(`^(${IDENT})\\.(${IDENT})$`).exec(expr);
     if (literal === null && member !== null && from !== null) {
       const owner = await follow(member[1] as string, simple ? Math.max(keyChain?.frame ?? 0, 0) : chain.frame);
+      if (owner.producer !== null) keyOwner = { field: member[2] as string, producer: owner.producer };
       const objectText = owner.producer?.expr ?? "";
       const field = new RegExp(`^\\{.*\\b${member[2]}\\s*:\\s*((["'])[^"'\\n]*\\2)`).exec(objectText);
       if (owner.producer !== null && field !== null)
@@ -238,7 +249,7 @@ export async function traceValue(
         );
       else if (isLookup && LOOKUP.test(def.lines.join("\n")))
         hypotheses.push(
-          `**The lookup found nothing.** ${c(def.name)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`,
+          `**The lookup found nothing.** ${c(call.module === null ? def.name : `${call.module}.${def.name}`)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`,
         );
       const shifted = zipShift(def);
       if (shifted !== null)
@@ -257,19 +268,50 @@ export async function traceValue(
     if (mismatch !== null) hypotheses.push(mismatch);
   }
 
+  // The missing value is a field of data that came from somewhere (an API, a webhook, a file): find
+  // where the field is set and which key of that data it reads, then check the repo's samples of the
+  // data (JSON fixtures, schemas, JSON in code) for that key. Silent unless the key is absent and a
+  // near-miss name is present.
+  const lastField = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(target.expr);
+  const fieldTarget =
+    fieldAccess && producer !== null && lastField !== null
+      ? { field: (lastField[1] ?? lastField[2]) as string, producer }
+      : keyOwner;
+  let payloadMismatch = false;
+  if (fieldTarget !== null) {
+    const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
+    if (origin !== null) {
+      steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
+      const data = await payloadKeys(await allFiles(), files, lang, origin);
+      const exact = data.some((k) => k.key === origin.key);
+      const near = exact ? [] : data.filter((k) => similar(k.key, origin.key)).sort((a, b) => closeness(a.key, origin.key) - closeness(b.key, origin.key));
+      if (near.length > 0) {
+        payloadMismatch = true;
+        const shown = unique(near.map((k) => k.key)).slice(0, 2).map((key) => {
+          const first = near.find((k) => k.key === key) as PayloadKey;
+          return `${c(key)} (${at(first.file, first.index)})`;
+        });
+        // The most specific lead goes first.
+        hypotheses.unshift(
+          `**Field name mismatch.** ${c(fieldTarget.field)} is read from ${c(origin.read)} at ${at(origin.file, origin.index)}, but no data sample in the project has ${c(origin.key)}; it has ${shown.join(" and ")}. If that is this data, read the key it actually uses rather than defaulting the missing value.`,
+        );
+      }
+    }
+  }
+
   // A field the code reads that the code building the value spells differently.
   // Not for `this`/`self` (their fields are set piecemeal) or data from outside (JSON, requests).
   const selfRooted = ["this", "self"].includes(target.root);
   const external = producer !== null && EXTERNAL.test(producer.expr);
   const fieldNames = new Set([...names].filter((n) => n !== "this" && n !== "self"));
   const builder =
-    target.key === null || selfRooted || external ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
+    target.key === null || selfRooted || external || payloadMismatch ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
   const builderNear = builder === null ? [] : builder.keys.filter((k) => similar(k, target.key as string));
   if (builder !== null && builderNear.length > 0) {
     hypotheses.push(
       `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key as string)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`,
     );
-  } else if (target.key !== null && !selfRooted && !external) {
+  } else if (target.key !== null && !selfRooted && !external && !payloadMismatch) {
     const keys = await writtenKeys(await allFiles(), files, lang);
     const exact = keys.filter((k) => k.key === target.key);
     const near = keys.filter((k) => k.key !== target.key && similar(k.key, target.key as string));
@@ -548,6 +590,44 @@ async function caseMismatch(
   return null;
 }
 
+interface PayloadKey {
+  readonly key: string;
+  readonly file: string;
+  readonly index: number;
+}
+
+/** Config and tooling files, not samples of data the program receives. */
+const NOT_PAYLOAD = /(?:^|[\\/])(?:package(?:-lock)?|tsconfig[\w.-]*|jsconfig|composer|\.?eslintrc[\w.-]*|renovate|lerna|turbo|vercel|firebase|app)\.json$|(?:^|[\\/])(?:docker-compose|\.?github|pnpm-lock|\.?gitlab-ci)[\w.-]*\.ya?ml$/;
+
+/**
+ * Keys of the data samples in the project: every object key in JSON files,
+ * keys in YAML files (OpenAPI schemas, fixtures), and quoted keys in code
+ * (JSON held in strings, dict literals), except on the line `skip` that reads the field.
+ */
+async function payloadKeys(allFiles: readonly string[], files: Files, lang: Lang, skip: { file: string; index: number }): Promise<PayloadKey[]> {
+  const out: PayloadKey[] = [];
+  for (const file of allFiles.slice(0, MAX_SCANNED_FILES)) {
+    const ext = extname(file).toLowerCase();
+    const isData = ext === ".json" || ext === ".yaml" || ext === ".yml";
+    if (!isData && LANG[ext] !== lang) continue;
+    if (isData && NOT_PAYLOAD.test(file)) continue;
+    const lines = await files.lines(file);
+    if (lines === null) continue;
+    const pattern = ext === ".yaml" || ext === ".yml" ? /^\s*-?\s*["']?([A-Za-z_][\w-]*)["']?\s*:/g : /["']([A-Za-z_][\w-]*)["']\s*:/g;
+    lines.forEach((line, index) => {
+      if (file === skip.file && index === skip.index) return;
+      for (const m of line.matchAll(pattern)) out.push({ key: m[1] as string, file, index });
+    });
+  }
+  return out;
+}
+
+/** 0 for the same name modulo case and separators, 1 for a prefix, 2 for a small edit. */
+function closeness(a: string, b: string): number {
+  const norm = (s: string) => s.toLowerCase().replace(/[_-]/g, "");
+  return norm(a) === norm(b) ? 0 : norm(a).startsWith(norm(b)) || norm(b).startsWith(norm(a)) ? 1 : 2;
+}
+
 async function writtenKeys(
   allFiles: readonly string[],
   files: Files,
@@ -767,7 +847,8 @@ class Files {
   ): Promise<Definition | null> {
     let order: string[];
     if (module !== null) {
-      const file = await this.moduleFile(module, near, lang, allFiles);
+      // `Order.from_payload(...)`: `Order` may be an imported class rather than a module.
+      const file = (await this.moduleFile(module, near, lang, allFiles)) ?? (await this.importedFrom(module, near, lang, allFiles)) ?? null;
       order = file === null ? [] : [file];
     } else {
       const imported = await this.importedFrom(name, near, lang, allFiles);
@@ -790,6 +871,80 @@ class Files {
     return matches[0] ?? null;
   }
 
+  /**
+   * Where `field` of the value `producer` returns is set, and the key of the
+   * incoming data it reads: `address=payload.get("shipping_address")` in the
+   * called function, `this.displayName = raw.displayName` in the constructed
+   * class, `amountDue: body.amountDue` in a mapper's object literal.
+   */
+  async fieldOrigin(
+    field: string,
+    producer: Producer,
+    lang: Lang,
+    allFiles: () => Promise<readonly string[]>,
+  ): Promise<{ key: string; read: string; file: string; index: number } | null> {
+    const call = callee(producer.expr);
+    if (call === null) return null;
+    const regions: { file: string; start: number; lines: readonly string[] }[] = [];
+    const def = await this.definition(call.short, call.module, producer.file, lang, allFiles);
+    if (def !== null) regions.push({ file: def.file, start: def.start, lines: def.lines });
+    const className = call.module !== null && /^[A-Z]/.test(call.module) ? call.module : /^[A-Z]/.test(call.short) ? call.short : null;
+    if (className !== null) {
+      const cls = await this.classRegion(className, producer.file, lang, allFiles);
+      if (cls !== null) regions.push(cls);
+    }
+    const f = escape(field);
+    const source = `(${IDENT}(?:\\.${IDENT})*)`;
+    const patterns =
+      lang === "python"
+        ? [
+            new RegExp(`(?:^|[\\s(,])(?:self\\.)?${f}\\s*=(?!=)\\s*(${source}\\.get\\(\\s*["']([^"']+)["'][^)]*\\))`),
+            new RegExp(`(?:^|[\\s(,])(?:self\\.)?${f}\\s*=(?!=)\\s*(${source}\\[\\s*["']([^"']+)["']\\s*\\])`),
+            new RegExp(`["']${f}["']\\s*:\\s*(${source}\\.get\\(\\s*["']([^"']+)["'][^)]*\\))`),
+            new RegExp(`["']${f}["']\\s*:\\s*(${source}\\[\\s*["']([^"']+)["']\\s*\\])`),
+          ]
+        : [
+            new RegExp(`\\bthis\\.${f}\\s*=(?!=)\\s*(${IDENT}\\??\\.(${IDENT}))\\b(?!\\s*[(.])`),
+            new RegExp(`\\bthis\\.${f}\\s*=(?!=)\\s*(${IDENT}\\[\\s*["']([^"']+)["']\\s*\\])`),
+            new RegExp(`(?:^|[{,\\s])["']?${f}["']?\\s*:\\s*(${IDENT}\\??\\.(${IDENT}))\\b(?!\\s*[(.])`),
+            new RegExp(`(?:^|[{,\\s])["']?${f}["']?\\s*:\\s*(${IDENT}\\[\\s*["']([^"']+)["']\\s*\\])`),
+          ];
+    for (const region of regions)
+      for (let i = 0; i < region.lines.length; i++)
+        for (const p of patterns) {
+          const m = p.exec(region.lines[i] as string);
+          if (m === null) continue;
+          const key = (lang === "python" ? m[3] : m[2]) as string;
+          return { key, read: (m[1] as string).trim(), file: region.file, index: region.start + i };
+        }
+    return null;
+  }
+
+  /** The body of `class name`, from the file `near` imports it from, `near` itself, or the one file that defines it. */
+  private async classRegion(
+    name: string,
+    near: string,
+    lang: Lang,
+    allFiles: () => Promise<readonly string[]>,
+  ): Promise<{ file: string; start: number; lines: readonly string[] } | null> {
+    const imported = await this.importedFrom(name, near, lang, allFiles);
+    const head = new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?class\\s+${escape(name)}\\b`);
+    const candidates = imported === undefined ? [near] : imported === null ? [] : [imported];
+    if (imported === undefined) {
+      const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang && f !== near).slice(0, MAX_SCANNED_FILES);
+      const defining: string[] = [];
+      for (const file of all) if ((await this.lines(file))?.some((l) => head.test(l))) defining.push(file);
+      if (defining.length === 1) candidates.push(defining[0] as string);
+    }
+    for (const file of candidates) {
+      const lines = await this.lines(file);
+      const start = lines?.findIndex((l) => head.test(l)) ?? -1;
+      if (lines === null || start === -1) continue;
+      return { file, start, lines: body(lines, start, lang, MAX_CLASS_LINES) };
+    }
+    return null;
+  }
+
   private async defineIn(file: string, name: string, lang: Lang): Promise<Definition | null> {
     if (!file.startsWith(this.root)) return null;
     const lines = await this.lines(file);
@@ -808,11 +963,11 @@ class Files {
 }
 
 /** The function starting at `start`: by indentation (Python) or by braces (JS), capped. */
-function body(lines: readonly string[], start: number, lang: Lang): string[] {
+function body(lines: readonly string[], start: number, lang: Lang, cap = MAX_BODY_LINES): string[] {
   const out = [lines[start] ?? ""];
   if (lang === "python") {
     const indent = /^\s*/.exec(out[0] as string)?.[0].length ?? 0;
-    for (let i = start + 1; i < lines.length && out.length < MAX_BODY_LINES; i++) {
+    for (let i = start + 1; i < lines.length && out.length < cap; i++) {
       const line = lines[i] ?? "";
       if (line.trim() !== "" && (/^\s*/.exec(line)?.[0].length ?? 0) <= indent) break;
       out.push(line);
@@ -822,7 +977,7 @@ function body(lines: readonly string[], start: number, lang: Lang): string[] {
   }
   let depth = 0;
   let opened = false;
-  for (let i = start; i < lines.length && out.length <= MAX_BODY_LINES; i++) {
+  for (let i = start; i < lines.length && out.length <= cap; i++) {
     const line = lines[i] ?? "";
     if (i > start) out.push(line);
     for (const c of line) {
