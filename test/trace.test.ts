@@ -278,6 +278,83 @@ describe("value trace", () => {
     assert.doesNotMatch(md, /hunter2/);
   });
 
+  it("lets runtime values decide, and flags when the run and a repo sample disagree", async () => {
+    const pytestOut = (order: string) =>
+      [
+        "____________________________________ test_r ____________________________________",
+        "",
+        `order = ${order}`,
+        "",
+        "    def receipt_line(order):",
+        '        customer = order.get("customer_id")',
+        ">       return customer.upper()",
+        "E       AttributeError: 'NoneType' object has no attribute 'upper'",
+        "",
+        "customer   = None",
+        `order      = ${order}`,
+        "",
+        "receipts.py:3: AttributeError",
+      ].join("\n");
+    const code = { "receipts.py": ["def receipt_line(order):", '    customer = order.get("customer_id")', "    return customer.upper()"] };
+
+    // The run had the key (empty); a stale fixture spells it differently: no name mismatch claimed.
+    const stale = project("conflict-stale", { ...code, "fixtures/order.json": ['{"customerId": "c-7"}'] });
+    const staleMd = hypotheses(await report(stale, pytestOut("{'customer_id': None}")));
+    assert.doesNotMatch(staleMd, /wrong key|Field name mismatch/);
+    assert.match(staleMd, /The run and the repo disagree.*had `customer_id`, but the sample at `fixtures\/order\.json:1` spells it `customerId`/);
+
+    // The run lacks the key the fixture has: the runtime value leads, and the disagreement is noted.
+    const changed = project("conflict-changed", { ...code, "fixtures/order.json": ['{"customer_id": "c-7"}'] });
+    const changedMd = hypotheses(await report(changed, pytestOut("{'customerId': 'c-7'}")));
+    assert.match(changedMd, /^- \*\*Runtime value: wrong key\.\*\*/);
+    assert.match(changedMd, /The run and the repo disagree.*had `customerId`, but the sample at `fixtures\/order\.json:1` has `customer_id`/);
+
+    // The object exists with an empty field: that does not contradict the static finding
+    // that its constructor read a key the data spells differently, so that finding stays.
+    const field = project("conflict-field", {
+      "fixtures/order.json": ['{"orderId": "o-1", "shippingAddress": {"line1": "x"}}'],
+      "models.py": [
+        "class Order:",
+        "    def __init__(self, id, address):",
+        "        self.id = id",
+        "        self.address = address",
+        "    @classmethod",
+        "    def from_payload(cls, payload):",
+        '        return cls(id=payload.get("orderId"), address=payload.get("shipping_address"))',
+      ],
+      "labels.py": ["def label(order):", "    return order.address['line1']"],
+      "test_app.py": ["import json", "from models import Order", "from labels import label", "def test_label():", "    order = Order.from_payload(json.load(open('fixtures/order.json')))", "    label(order)"],
+    });
+    const fieldMd = hypotheses(
+      await report(
+        field,
+        [
+          "____________________________________ test_label ____________________________________",
+          "",
+          "    def test_label():",
+          "        order = Order.from_payload(json.load(open('fixtures/order.json')))",
+          ">       label(order)",
+          "",
+          "test_app.py:6: ",
+          "_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ",
+          "",
+          "    def label(order):",
+          ">       return order.address['line1']",
+          "E       TypeError: 'NoneType' object is not subscriptable",
+          "",
+          "order      = Order(id='o-1', address=None)",
+          "",
+          "labels.py:2: TypeError",
+        ].join("\n"),
+      ),
+    );
+    assert.match(fieldMd, /Field name mismatch.*`address` is read from `payload\.get\("shipping_address"\)`/);
+
+    // They agree: no conflict note.
+    const agree = project("conflict-agree", { ...code, "fixtures/order.json": ['{"customerId": "c-7"}'] });
+    assert.doesNotMatch(hypotheses(await report(agree, pytestOut("{'customerId': 'c-7'}"))), /disagree/);
+  });
+
   it("adds nothing when the source gives no lead", async () => {
     const root = project("plain", { "a.py": ["def f(x):", "    return x.name", "f(None)"] });
     const md = await report(root, [

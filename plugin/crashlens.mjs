@@ -3264,17 +3264,33 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const readMatch = producer === null || element ? null : new RegExp(`^(${IDENT}(?:\\.${IDENT})*)\\s*(?:\\.get\\(\\s*["']([^"']+)["']|\\[\\s*["']([^"']+)["']\\s*\\])`).exec(producer.expr);
   const containerOf = (expr) => /^(.*?)(?:\.[A-Za-z_$][\w$]*|\[\s*["'][^"']+["']\s*\])$/.exec(expr)?.[1] ?? null;
   const read = readMatch !== null && producer !== null ? { container: readMatch[1], key: readMatch[2] ?? readMatch[3], frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr } : target.key !== null && kind === "python-key-error" ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${JSON.stringify(target.key)}]` } : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null ? { container: containerOf(target.expr), key: lastFieldName(target.expr), frame: 0, file: crash.file, index: crash.line - 1, text: target.expr } : null;
+  let runtimeKeys = null;
   let runtimeMismatch = false;
   if (read !== null) {
     const actual = localValue(frames[read.frame]?.locals, read.container);
     const keys = actual === null ? null : keysOf(actual);
     if (actual !== null && keys !== null) {
+      runtimeKeys = keys;
       const shown = `${c(read.container)} was ${c(maskValue(read.container, actual))}`;
       if (!keys.has(read.key)) {
         const near = [...keys].filter((k) => similar(k, read.key)).sort((a, b) => closeness(a, read.key) - closeness(b, read.key));
         runtimeMismatch = near.length > 0;
         hypotheses.unshift(
           near.length > 0 ? `**Runtime value: wrong key.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}: it has ${c(near[0])}, not ${c(read.key)}.` : `**Runtime value: key missing.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}, with no ${c(read.key)}. Find out why the data lacks it before defaulting it.`
+        );
+      }
+      const samples = await payloadKeys(await allFiles(), files, lang, { file: read.file, index: read.index });
+      const sampleExact = samples.find((k) => k.key === read.key);
+      const sampleNear = samples.filter((k) => k.key !== read.key && similar(k.key, read.key));
+      const runtimeNear = [...keys].find((k) => k !== read.key && similar(k, read.key));
+      if (!keys.has(read.key) && runtimeNear !== void 0 && sampleExact !== void 0)
+        hypotheses.push(
+          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(runtimeNear)}, but the sample at ${at(sampleExact.file, sampleExact.index)} has ${c(read.key)}. Something between them renames it (a step that transforms the keys, a changed contract), or the sample is stale.`
+        );
+      else if (keys.has(read.key) && sampleExact === void 0 && sampleNear.length > 0) {
+        const first = sampleNear[0];
+        hypotheses.push(
+          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(read.key)}, but the sample at ${at(first.file, first.index)} spells it ${c(first.key)}. The code matches the real data; the sample may be stale.`
         );
       }
     }
@@ -3289,7 +3305,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
   let payloadMismatch = false;
   if (fieldTarget !== null && !runtimeMismatch) {
     const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
-    if (origin !== null) {
+    if (origin !== null && runtimeKeys?.has(origin.key) !== true) {
       steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
       const data = await payloadKeys(await allFiles(), files, lang, origin);
       const exact = data.some((k) => k.key === origin.key);
@@ -3309,13 +3325,13 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const selfRooted = ["this", "self"].includes(target.root);
   const external = producer !== null && EXTERNAL.test(producer.expr);
   const fieldNames = new Set([...names].filter((n) => n !== "this" && n !== "self"));
-  const builder = target.key === null || selfRooted || external || payloadMismatch ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
+  const builder = target.key === null || selfRooted || external || payloadMismatch || runtimeMismatch || runtimeKeys?.has(target.key) === true ? null : await builtWithout(target.key, fieldNames, frames, files, lang, await allFiles());
   const builderNear = builder === null ? [] : builder.keys.filter((k) => similar(k, target.key));
   if (builder !== null && builderNear.length > 0) {
     hypotheses.push(
       `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
     );
-  } else if (target.key !== null && !selfRooted && !external && !payloadMismatch) {
+  } else if (target.key !== null && !selfRooted && !external && !payloadMismatch && !runtimeMismatch && runtimeKeys?.has(target.key) !== true) {
     const keys = await writtenKeys(await allFiles(), files, lang);
     const exact = keys.filter((k) => k.key === target.key);
     const near = keys.filter((k) => k.key !== target.key && similar(k.key, target.key));
