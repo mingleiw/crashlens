@@ -65,6 +65,7 @@ sample has `customerId` instead. With that, **5 of 5 runs fixed `models.py`**.
 | Misleading comment at the crash, bug 3 files away (18 runs) | 6/18 root-cause fixes | **13/18** |
 | A data field read under the wrong name, 4 new held-out cases (20 runs) | 5/20 (10/40 over two batches) | **20/20** (the previous report: 9/20) |
 | A computed key (`record[prefix + "_ref"]`) the data spells differently (5 runs) | 5/10 over two batches | **5/5** (the previous report: 1/5) |
+| A nested config key dropped by a shallow merge, smaller model (3 cases, 15 runs) | 1/15 (all others guarded the crash site) | **15/15** (the previous report: 10/15) |
 | Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
 | Stripped binary + core dump: turns to the root cause | 4 | **1** |
 | Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
@@ -152,15 +153,17 @@ small crashing project twice: once with only the error output (A), once with
 the error output plus the crashlens report (B). Each diff is scored as a
 root-cause fix or a symptom guard.
 
-- **19 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+- **21 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
   id, a renamed field across a queue, an environment string used as a number,
   a missing `await`, a currency code two files away, shifted CSV columns, and
-  data fields read under the wrong name (camelCase vs snake_case, a nested key).
-- **12 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+  data fields read under the wrong name (camelCase vs snake_case, a nested key),
+  and a nested config key lost in a shallow merge.
+- **13 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
   were written before the check they test existed, with the bug one to three
   files from the crash and, in most, a misleading comment at the crash. The
   four payload cases were then used to fix one bug (a chained call split over
-  lines), so they are not fully held out any more.
+  lines), so they are not fully held out any more. `js-config` was used to
+  build the config-object trace and is no longer marked held out.
 
 ```bash
 npm run build
@@ -193,6 +196,14 @@ What we have seen so far:
   any other: the previous report got 1/5 root-cause fixes, the new one 5/5.
   Without crashlens the agent got 1/5 in one batch and 4/5 in another, a
   reminder of how much single batches vary.
+- **Config merges:** when `Object.assign({}, defaults, overrides)`,
+  `{...a, ...b}` or `{**a, **b}` replaces a whole nested object, the crash
+  shows up far from the merge. crashlens now follows the value through the
+  config object to the merge and names the override that drops the key. On
+  the smaller model, the error alone got 1/15 root-cause fixes, the previous
+  report 10/15 (0/5 on the Python case, where it stopped at `settings["cache"]`), the
+  new one 15/15. The strong model already got 14/15 without crashlens; the
+  new report took it to 15/15 and cut turns (5.8 → 5.0, 7.4 → 6.4, 8.0 → 6.0).
 - **Runtime values:** on three held-out cases where the failure output already
   printed the variables (pytest `--showlocals`, a Sentry event), the agent
   fixed the real bug 5/5 without crashlens too: with the values on screen, it
@@ -266,7 +277,8 @@ and machines.
   `await` on an `async` function, a lookup whose key differs only in case
   from the stored one (followed back to the literal, even in a config file), a
   field the producer spells differently from the consumer, columns zipped
-  against a shifted slice, or an environment value used as a number. These
+  against a shifted slice, an environment value used as a number, or a
+  config object whose shallow merge drops a nested key. These
   come first in the report, labeled as hypotheses from a static reading.
   When the code reads a field of incoming data under a name the project's data
   samples (JSON fixtures, OpenAPI schemas) spell differently, it names both.
@@ -506,7 +518,8 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [x] Trace the bad value to where it was produced, with named hypotheses (Python, JavaScript)
 - [x] A/B benchmark for coding agents (`bench/`)
 - [x] Follow a field to where it is set and check its key against the project's data samples
-- [ ] Value tracing for Java, Go and Rust; follow values through config objects
+- [x] Follow values through config objects (shallow-merge hypothesis)
+- [ ] Value tracing for Java, Go and Rust
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)

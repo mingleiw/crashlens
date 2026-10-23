@@ -3225,11 +3225,29 @@ async function traceValue(kind, message, frames, root, allFiles) {
   steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
   if (target.computed !== void 0)
     steps.push(`The key is computed: ${c(target.computed)} evaluated to ${c(`'${target.key}'`)} (from the KeyError message).`);
-  const follow = async (start, from) => {
+  const follow = async (start, from, throughFields = false) => {
     let name2 = start;
     let element2 = false;
+    let path = [];
     const names2 = /* @__PURE__ */ new Set([name2]);
-    const done = (frame2, producer2) => ({ name: name2, names: names2, frame: frame2, producer: producer2, element: element2 });
+    const done = (frame2, producer2) => ({ name: name2, names: names2, frame: frame2, producer: producer2, element: element2, path });
+    const offCall = (expr) => {
+      if (!throughFields) return null;
+      const m = new RegExp(`^([\\s\\S]*\\))((?:\\.${IDENT}|\\[\\s*["'][^"'\\]]+["']\\s*\\])+)$`).exec(expr.trim());
+      if (m === null || callee(m[1]) === null) return null;
+      const fields = fieldPath(`x${m[2]}`)?.fields;
+      if (fields === void 0) return null;
+      path = [...fields, ...path];
+      return m[1];
+    };
+    const throughField = (expr) => {
+      if (!throughFields) return false;
+      const member = fieldPath(expr);
+      if (member === null) return false;
+      name2 = member.root;
+      path = [...member.fields, ...path];
+      return true;
+    };
     for (let f = from; f < frames.length; f++) {
       const frame2 = frames[f];
       const lines = await files.lines(frame2.file);
@@ -3248,6 +3266,13 @@ async function traceValue(kind, message, frames, root, allFiles) {
         );
         element2 ||= assigned.loop;
         const alias = new RegExp(`^(${IDENT})$`).exec(assigned.rhs);
+        if (alias === null && !assigned.loop && throughField(assigned.rhs)) {
+          index = assigned.index;
+          assigned = assignment(lines, from2, index, name2, lang);
+          continue;
+        }
+        const produced2 = alias === null && !assigned.loop ? offCall(assigned.rhs) : null;
+        if (produced2 !== null) return done(f, { file: frame2.file, index: assigned.index, expr: produced2, element: element2 });
         if (alias === null || names2.has(alias[1]))
           return done(f, { file: frame2.file, index: assigned.index, expr: assigned.rhs, element: element2 });
         name2 = alias[1];
@@ -3268,13 +3293,16 @@ async function traceValue(kind, message, frames, root, allFiles) {
       if (arg === null) break;
       steps.push(`${c(name2)} is a parameter of ${c(shortName(frame2.function))}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
       const simple = new RegExp(`^(${IDENT})$`).exec(arg);
+      if (simple === null && throughField(arg)) continue;
+      const produced = simple === null ? offCall(arg) : null;
+      if (produced !== null) return done(f + 1, { file: caller.file, index: caller.line - 1, expr: produced, element: element2 });
       if (simple === null) return done(f + 1, { file: caller.file, index: caller.line - 1, expr: arg, element: element2 });
       name2 = simple[1];
       names2.add(name2);
     }
     return done(-1, null);
   };
-  const chain = target.expr.endsWith(")") ? { name: target.expr, names: /* @__PURE__ */ new Set(), frame: 0, producer: { file: crash.file, index: crash.line - 1, expr: target.expr }, element: false } : await follow(target.root, 0);
+  const chain = target.expr.endsWith(")") ? { name: target.expr, names: /* @__PURE__ */ new Set(), frame: 0, producer: { file: crash.file, index: crash.line - 1, expr: target.expr }, element: false, path: [] } : await follow(target.root, 0, true);
   const { name, names, producer } = chain;
   const element = producer?.element === true;
   const fieldAccess = target.expr !== target.root && !target.expr.endsWith(")");
@@ -3389,6 +3417,19 @@ async function traceValue(kind, message, frames, root, allFiles) {
           `**Field name mismatch.** ${c(fieldTarget.field)} is read from ${c(origin.read)} at ${at(origin.file, origin.index)}, but no data sample in the project has ${c(origin.key)}; it has ${shown.join(" and ")}. If that is this data, read the key it actually uses rather than defaulting the missing value.`
         );
       }
+    }
+  }
+  const lastName = fieldAccess ? lastFieldName(target.expr) : null;
+  const fullPath = [...chain.path, ...lastName !== null ? [lastName] : kind === "python-key-error" && target.key !== null ? [target.key] : []];
+  if (producer !== null && def !== null && fullPath.length >= 2) {
+    const dropped = await files.shallowMergeDrop(def, fullPath, lang, allFiles);
+    if (dropped !== null) {
+      const where = fullPath.slice(0, -1).join(".");
+      const missing = fullPath.at(-1);
+      steps.push(`${c(name)} comes from ${c(producer.expr)}, built by the merge ${c(dropped.merge)} at ${at(def.file, dropped.mergeIndex)}.`);
+      hypotheses.unshift(
+        `**Shallow merge drops a nested key.** ${c(dropped.merge)} at ${at(def.file, dropped.mergeIndex)} replaces whole top-level values. The source at ${at(dropped.override.file, dropped.override.index)} sets ${c(where)} without ${c(missing)}, so ${c(`${where}.${missing}`)} from ${at(dropped.base.file, dropped.base.index)} is lost. Merge nested objects deeply, or set ${c(missing)} in that override.`
+      );
     }
   }
   const selfRooted = ["this", "self"].includes(target.root);
@@ -3621,6 +3662,25 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
   }
   return null;
 }
+function fieldPath(expr) {
+  const m = new RegExp(`^(${IDENT})((?:\\.${IDENT}|\\[\\s*["'][^"'\\]]+["']\\s*\\])+)$`).exec(expr.trim());
+  if (m === null) return null;
+  const fields = [...m[2].matchAll(new RegExp(`\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\]`, "g"))].map((f) => f[1] ?? f[2]);
+  return { root: m[1], fields };
+}
+var MAX_SHAPE_DEPTH = 16;
+function parseShape(inner, lang, depth = 0) {
+  const shape = /* @__PURE__ */ new Map();
+  if (depth > MAX_SHAPE_DEPTH) return shape;
+  for (const item of splitTopLevel(inner)) {
+    const m = (lang === "python" ? /^\s*(["'])([^"']+)\1\s*:\s*([\s\S]*)$/ : /^\s*(["']?)([A-Za-z_$][\w$]*)\1\s*:\s*([\s\S]*)$/).exec(item);
+    if (m === null) continue;
+    const value = m[3].trim();
+    const nested = value.startsWith("{") ? balanced(value, 0) : null;
+    shape.set(m[2], nested === null ? null : parseShape(nested, lang, depth + 1));
+  }
+  return shape;
+}
 function lastFieldName(expr) {
   const m = new RegExp(`(?:\\.(${IDENT})|\\[\\s*["']([^"'\\]]+)["']\\s*\\])$`).exec(expr);
   return m === null ? null : m[1] ?? m[2];
@@ -3668,6 +3728,41 @@ function maskValue(name, value) {
     (whole, lead, _q, key, attr, quote) => SECRET_NAME.test(key ?? attr ?? "") ? `${lead}${quote}***${quote}` : whole
   ).replace(SECRET_VALUE, (whole) => `${whole[0]}***${whole[0]}`);
   return masked.length > MAX_VALUE ? `${masked.slice(0, MAX_VALUE - 1)}\u2026` : masked;
+}
+function shallowMerge(def, lang) {
+  for (let i = 0; i < def.lines.length; i++) {
+    const line = def.lines[i];
+    const text = def.lines.slice(i, i + 8).join("\n");
+    if (lang === "js") {
+      const assign = /Object\.assign\s*\(/.exec(line);
+      if (assign !== null) {
+        const inner = balanced(text, text.indexOf("(", assign.index));
+        if (inner === null) continue;
+        const args = splitTopLevel(inner).map((a) => a.trim());
+        const sources = /^\{\s*\}$/.test(args[0] ?? "") ? args.slice(1) : args;
+        if (sources.length >= 2) return { text: `Object.assign(${inner.replace(/\s+/g, " ").trim()})`, index: def.start + i, sources };
+      }
+    }
+    const open3 = line.search(lang === "js" ? /\{\s*\.\.\./ : /\{\s*\*\*/);
+    if (open3 !== -1) {
+      const inner = balanced(text, open3);
+      if (inner === null) continue;
+      const marker = lang === "js" ? "..." : "**";
+      const sources = splitTopLevel(inner).map((a) => a.trim()).filter((a) => a.startsWith(marker)).map((a) => a.slice(marker.length));
+      if (sources.length >= 2) return { text: `{${inner.replace(/\s+/g, " ").trim()}}`, index: def.start + i, sources };
+    }
+    if (lang === "python") {
+      const dictCall = /\bdict\s*\(/.exec(line);
+      const inner = dictCall === null ? null : balanced(text, text.indexOf("(", dictCall.index));
+      if (inner !== null) {
+        const sources = splitTopLevel(inner).map((a) => a.trim().replace(/^\*\*/, "")).filter((a) => !/=/.test(a));
+        if (sources.length >= 2) return { text: `dict(${inner.trim()})`, index: def.start + i, sources };
+      }
+      const update = new RegExp(`\\b(${IDENT})\\.update\\(\\s*([^)]+?)\\s*\\)`).exec(line);
+      if (update !== null) return { text: update[0], index: def.start + i, sources: [update[1], update[2]] };
+    }
+  }
+  return null;
 }
 var NOT_PAYLOAD = /(?:^|[\\/])(?:package(?:-lock)?|tsconfig[\w.-]*|jsconfig|composer|\.?eslintrc[\w.-]*|renovate|lerna|turbo|vercel|firebase|app)\.json$|(?:^|[\\/])(?:docker-compose|\.?github|pnpm-lock|\.?gitlab-ci)[\w.-]*\.ya?ml$/;
 async function payloadKeys(allFiles, files, lang, skip) {
@@ -3924,6 +4019,98 @@ var Files = class {
       return { file, start, lines: body(lines, start, lang, MAX_CLASS_LINES) };
     }
     return null;
+  }
+  /**
+   * A shallow merge in `def` that loses the last key of `path`: an earlier source has
+   * path[0]...path[-2] holding the key, a later source sets path[0] without it. Sources are
+   * resolved statically (required modules, module attributes, local variables, ternaries);
+   * null when the merge is not shallow, a source cannot be resolved, or nothing is lost.
+   */
+  async shallowMergeDrop(def, path, lang, allFiles) {
+    const merge = shallowMerge(def, lang);
+    if (merge === null) return null;
+    const resolved = [];
+    for (const source of merge.sources) resolved.push(await this.shapesOf(source, def, lang, allFiles));
+    const holds = (shape, keys) => {
+      let at = shape;
+      for (const key of keys) {
+        if (!(at instanceof Map)) return null;
+        at = at.get(key);
+        if (at === void 0) return false;
+      }
+      return true;
+    };
+    const container = path.slice(0, -1);
+    for (let later = resolved.length - 1; later > 0; later--)
+      for (const override of resolved[later]) {
+        if (!override.shape.has(path[0]) || holds(override.shape, path) !== false) continue;
+        for (let earlier = later - 1; earlier >= 0; earlier--)
+          for (const base of resolved[earlier])
+            if (holds(base.shape, path) === true && holds(base.shape, container) === true)
+              return {
+                merge: merge.text,
+                mergeIndex: merge.index,
+                base: { ...base, index: await this.keyLine(base, path[0]) },
+                override: { ...override, index: await this.keyLine(override, path[0]) }
+              };
+      }
+    return null;
+  }
+  /** The line that sets `key` in the literal starting at `at.index`, else the literal's first line. */
+  async keyLine(at, key) {
+    const lines = await this.lines(at.file) ?? [];
+    const pattern = new RegExp(`(?:^|[{,\\s])["']?${escape(key)}["']?\\s*:`);
+    for (let i = at.index; i < Math.min(lines.length, at.index + 200); i++) if (pattern.test(lines[i])) return i;
+    return at.index;
+  }
+  /** The literal shapes a merge source can be: `require("./x")`, `mod.NAME`, a variable assigned one, or a ternary of them. */
+  async shapesOf(expr, def, lang, allFiles, depth = 0) {
+    if (depth > 3) return [];
+    const text = expr.trim();
+    const out = [];
+    if (text.startsWith("{")) {
+      const inner = balanced(text, 0);
+      return inner === null || inner.trim() === "" ? [] : [{ shape: parseShape(inner, lang), file: def.file, index: def.start }];
+    }
+    for (const m of text.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g)) {
+      const file = await this.resolveSpec(m[1], def.file, lang, allFiles);
+      const exported = file === null ? null : await this.literalIn(file, lang === "js" ? /(?:module\.exports|export\s+default)\s*=?\s*\{/ : null);
+      if (exported !== null) out.push(exported);
+    }
+    if (lang === "python")
+      for (const m of text.matchAll(new RegExp(`\\b(${IDENT})\\.(${IDENT})\\b`, "g"))) {
+        const file = await this.moduleFile(m[1], def.file, lang, allFiles);
+        const found = file === null ? null : await this.literalIn(file, new RegExp(`^${escape(m[2])}\\s*(?::[^=]+)?=\\s*\\{`));
+        if (found !== null) out.push(found);
+      }
+    const bare = new RegExp(`^(${IDENT})$`).exec(text);
+    if (bare !== null) {
+      const name = bare[1];
+      const local = assignment(def.lines, 1, def.lines.length, name, lang);
+      if (local !== null) return this.shapesOf(local.rhs, def, lang, allFiles, depth + 1);
+      const fileLines = await this.lines(def.file) ?? [];
+      const top = assignment(fileLines, 0, def.start, name, lang);
+      if (top !== null) return this.shapesOf(top.rhs, { ...def, lines: fileLines, start: 0 }, lang, allFiles, depth + 1);
+      if (lang === "python") {
+        const imported = await this.importedFrom(name, def.file, lang, allFiles);
+        const found = typeof imported === "string" ? await this.literalIn(imported, new RegExp(`^${escape(name)}\\s*(?::[^=]+)?=\\s*\\{`)) : null;
+        if (found !== null) out.push(found);
+      }
+    }
+    return out;
+  }
+  /** The first object/dict literal opened on a line matching `head` in `file` (JS: the module's export). */
+  async literalIn(file, head) {
+    if (head === null) return null;
+    const lines = await this.lines(file);
+    if (lines === null) return null;
+    const index = lines.findIndex((l) => head.test(l));
+    if (index === -1) return null;
+    const text = lines.slice(index).join("\n");
+    const open3 = text.indexOf("{", head.exec(lines[index])?.index ?? 0);
+    const inner = open3 === -1 ? null : balanced(text, open3);
+    if (inner === null) return null;
+    return { shape: parseShape(inner, LANG[extname(file)]), file, index };
   }
   async defineIn(file, name, lang) {
     if (!file.startsWith(this.root)) return null;

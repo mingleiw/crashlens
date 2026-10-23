@@ -406,6 +406,89 @@ describe("value trace", () => {
     assert.doesNotMatch(md, /The key is computed|## Hypotheses/);
   });
 
+  describe("config objects built by a merge", () => {
+    it("survives a deeply nested config literal", async () => {
+      // One brace per line: long lines are ignored, so this is the shape a crafted file would use.
+      const deep = `module.exports = { db:\n${"{ a:\n".repeat(120000)}1\n${"}\n".repeat(120000)}};`;
+      const root = project("merge-nested", {
+        "defaults.js": [deep],
+        "production.js": ["module.exports = { db: {} };"],
+        "config.js": ['const defaults = require("./defaults");', "function loadConfig() {", '  const overrides = require("./production");', "  return Object.assign({}, defaults, overrides);", "}", "module.exports = { loadConfig };"],
+        "pool.js": ["function createPool(dbConfig) {", "  return dbConfig.pool.max;", "}", "module.exports = { createPool };"],
+        "server.js": ['const { loadConfig } = require("./config");', 'const { createPool } = require("./pool");', "createPool(loadConfig().db);"],
+      });
+      const md = await report(root, [
+        "TypeError: Cannot read properties of undefined (reading 'max')",
+        `    at createPool (${root}/pool.js:2:23)`,
+        `    at Object.<anonymous> (${root}/server.js:3:1)`,
+      ].join("\n"));
+      assert.match(md, /The bad value is `dbConfig\.pool`/);
+    });
+
+    const jsCrash = (root: string) =>
+      [
+        "TypeError: Cannot read properties of undefined (reading 'max')",
+        `    at createPool (${root}/pool.js:2:23)`,
+        `    at Object.<anonymous> (${root}/server.js:3:1)`,
+      ].join("\n");
+    const jsProject = (name: string, merge: string, override: string, extra: Record<string, string[]> = {}) =>
+      project(name, {
+        "defaults.js": ["module.exports = {", "  db: { host: 'localhost', pool: { max: 10 } },", "};"],
+        "production.js": ["module.exports = {", `  ${override}`, "};"],
+        "config.js": ['const defaults = require("./defaults");', "function loadConfig(env) {", '  const overrides = env === "production" ? require("./production") : {};', `  return ${merge};`, "}", "module.exports = { loadConfig };"],
+        "pool.js": ["function createPool(dbConfig) {", "  return dbConfig.pool.max;", "}", "module.exports = { createPool };"],
+        "server.js": ['const { loadConfig } = require("./config");', 'const { createPool } = require("./pool");', 'createPool(loadConfig("production").db);'],
+        ...extra,
+      });
+
+    it("names the nested key a shallow Object.assign or spread drops, through config.db", async () => {
+      for (const merge of ["Object.assign({}, defaults, overrides)", "{ ...defaults, ...overrides }"]) {
+        const root = jsProject(`merge-${merge.length}`, merge, "db: { host: 'db.internal' },");
+        const md = await report(root, jsCrash(root));
+        assert.match(hypotheses(md), /^- \*\*Shallow merge drops a nested key\.\*\*.*`production\.js:2` sets `db` without `pool`, so `db\.pool` from `defaults\.js:2` is lost/);
+      }
+    });
+
+    it("handles Python {**a, **b} and dict.update with subscripted config", async () => {
+      for (const merge of ["{**defaults.DEFAULTS, **overrides}", "dict(defaults.DEFAULTS, **overrides)"]) {
+        const root = project(`py-merge-${merge.length}`, {
+          "defaults.py": ['DEFAULTS = {"cache": {"backend": "memory", "ttl": 300}}'],
+          "prod.py": ['OVERRIDES = {"cache": {"backend": "redis"}}'],
+          "config.py": ["import defaults", "import prod", "def load():", "    overrides = prod.OVERRIDES", `    return ${merge}`],
+          "app.py": ["import config", "def make(cfg):", '    return cfg["ttl"]', 'make(config.load()["cache"])'],
+        });
+        const md = await report(root, [
+          "Traceback (most recent call last):",
+          `  File "${root}/app.py", line 4, in <module>`,
+          '    make(config.load()["cache"])',
+          `  File "${root}/app.py", line 3, in make`,
+          '    return cfg["ttl"]',
+          "KeyError: 'ttl'",
+        ].join("\n"));
+        assert.match(hypotheses(md), /Shallow merge drops a nested key.*`prod\.py:1` sets `cache` without `ttl`, so `cache\.ttl` from `defaults\.py:1` is lost/, merge);
+      }
+    });
+
+    it("stays silent for a deep merge, an override that keeps the key, a top-level key, or a source it cannot see", async () => {
+      const deep = jsProject("merge-deep", "deepMerge(defaults, overrides)", "db: { host: 'db.internal' },", {
+        "config.js": ['const defaults = require("./defaults");', "function deepMerge(a, b) { return a; }", "function loadConfig(env) {", '  const overrides = env === "production" ? require("./production") : {};', "  return deepMerge(defaults, overrides);", "}", "module.exports = { loadConfig };"],
+      });
+      assert.doesNotMatch(await report(deep, jsCrash(deep)), /Shallow merge/);
+      const kept = jsProject("merge-kept", "Object.assign({}, defaults, overrides)", "db: { host: 'db.internal', pool: { max: 50 } },");
+      assert.doesNotMatch(await report(kept, jsCrash(kept)), /Shallow merge/);
+      const runtime = jsProject("merge-runtime", "Object.assign({}, defaults, overrides)", "db: { host: 'db.internal' },", {
+        "config.js": ['const defaults = require("./defaults");', 'const fs = require("fs");', "function loadConfig(env) {", '  const overrides = JSON.parse(fs.readFileSync(env + ".json", "utf8"));', "  return Object.assign({}, defaults, overrides);", "}", "module.exports = { loadConfig };"],
+      });
+      assert.doesNotMatch(await report(runtime, jsCrash(runtime)), /Shallow merge/);
+      // `config.db` itself missing: a shallow merge keeps top-level keys, so it is not the cause.
+      const top = jsProject("merge-top", "Object.assign({}, defaults, overrides)", "log: { level: 'warn' },", {
+        "pool.js": ["function createPool(config) {", "  return config.cache.max;", "}", "module.exports = { createPool };"],
+        "server.js": ['const { loadConfig } = require("./config");', 'const { createPool } = require("./pool");', 'createPool(loadConfig("production"));'],
+      });
+      assert.doesNotMatch(await report(top, jsCrash(top)), /Shallow merge/);
+    });
+  });
+
   it("adds nothing when the source gives no lead", async () => {
     const root = project("plain", { "a.py": ["def f(x):", "    return x.name", "f(None)"] });
     const md = await report(root, [

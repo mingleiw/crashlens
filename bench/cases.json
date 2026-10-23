@@ -132,12 +132,12 @@
       "symptom": "if (not )?customer( is None)?\\b|if customer\\b|customer\\.\\w+ if customer|getattr\\(customer"
     },
     "js-config": {
-      "heldout": true,
+      "heldout": false,
       "run": [
         "node",
         "server.js"
       ],
-      "bug": "loadConfig uses a shallow Object.assign, so production's db object replaces the default db and drops pool. Two files from the crash, with a comment there saying pool settings are optional.",
+      "bug": "loadConfig uses a shallow Object.assign, so production's db object replaces the default db and drops pool. Two files from the crash, with a comment there saying pool settings are optional. (Used to build the config-object trace, so no longer held out.)",
       "root": [
         {
           "file": "config/index.js",
@@ -341,6 +341,44 @@
         }
       ],
       "symptom": "\\.get\\(|not in record|in record|except KeyError"
+    },
+    "py-settings-merge": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "app.py"
+      ],
+      "bug": "config.load merges with {**defaults, **overrides}; prod's cache override has no ttl, so the whole default cache dict is replaced and ttl is lost. Two files from the crash, with a comment saying TTL is optional.",
+      "root": [
+        {
+          "file": "config.py",
+          "pattern": "for |deep|merge|\\.update\\(|\\{\\*\\*defaults\\.DEFAULTS\\[|cache\\b"
+        },
+        {
+          "file": "prod.py",
+          "pattern": "\"ttl\""
+        }
+      ],
+      "symptom": "\\.get\\(\"ttl\"|\"ttl\" in|except KeyError"
+    },
+    "js-spread-merge": {
+      "heldout": true,
+      "run": [
+        "node",
+        "server.js"
+      ],
+      "bug": "settings() merges with object spread; local.js's http override has no timeouts, so the default http object is replaced and timeouts is lost. One file from the crash, with a comment saying timeouts are optional.",
+      "root": [
+        {
+          "file": "settings.js",
+          "pattern": "deep|merge|for \\(|Object\\.keys|http:"
+        },
+        {
+          "file": "local.js",
+          "pattern": "timeouts"
+        }
+      ],
+      "symptom": "timeouts\\?\\.|\\?\\? ?\\{|\\|\\| ?\\{|if \\(!timeouts|\\?\\? ?\\d|\\|\\| ?\\d"
     }
   }
 }
