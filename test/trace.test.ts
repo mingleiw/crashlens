@@ -355,6 +355,57 @@ describe("value trace", () => {
     assert.doesNotMatch(hypotheses(await report(agree, pytestOut("{'customerId': 'c-7'}"))), /disagree/);
   });
 
+  it("uses the evaluated key from a KeyError when the code computes the key", async () => {
+    const root = project("dynkey", {
+      "importer.py": ["def load():", '    return [{"account": "acme", "kind": "billing", "billing_reference": "BL-1", "amount": 5}]'],
+      "refs.py": ["def reference_for(record, prefix):", '    return record[prefix + "_ref"]'],
+      "ledger.py": [
+        "from refs import reference_for",
+        "def line(record):",
+        '    ref = reference_for(record, record["kind"])',
+        "    return record['account'] + ref + str(record['amount'])",
+      ],
+    });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/ledger.py", line 3, in line`,
+      '    ref = reference_for(record, record["kind"])',
+      `  File "${root}/refs.py", line 2, in reference_for`,
+      '    return record[prefix + "_ref"]',
+      "KeyError: 'billing_ref'",
+    ].join("\n"));
+    assert.match(md, /The key is computed: `prefix \+ "_ref"` evaluated to `'billing_ref'`/);
+    assert.match(hypotheses(md), /Field name mismatch.*no `billing_ref`; it has `billing_reference` instead/);
+  });
+
+  it("compares a computed key with the runtime value from pytest --showlocals", async () => {
+    const root = project("dynkey-locals", { "cfg.py": ["def url(cfg, env):", '    return cfg[f"{env}_url"]'] });
+    const md = await report(root, [
+      "____________________________________ test_url ____________________________________",
+      "",
+      "    def url(cfg, env):",
+      '>       return cfg[f"{env}_url"]',
+      "E       KeyError: 'prod_url'",
+      "",
+      "cfg        = {'PROD_URL': 'https://api', 'staging_url': 'https://stg'}",
+      "env        = 'prod'",
+      "",
+      "cfg.py:2: KeyError",
+    ].join("\n"));
+    assert.match(hypotheses(md), /Runtime value: wrong key.*reads `cfg\[f"\{env\}_url"\]`.*it has `PROD_URL`, not `prod_url`/);
+  });
+
+  it("stays silent when several computed subscripts could have raised the KeyError", async () => {
+    const root = project("dynkey-ambiguous", { "a.py": ["def f(a, b, x, y):", "    return a[x] + b[y]"] });
+    const md = await report(root, [
+      "Traceback (most recent call last):",
+      `  File "${root}/a.py", line 2, in f`,
+      "    return a[x] + b[y]",
+      "KeyError: 'k'",
+    ].join("\n"));
+    assert.doesNotMatch(md, /The key is computed|## Hypotheses/);
+  });
+
   it("adds nothing when the source gives no lead", async () => {
     const root = project("plain", { "a.py": ["def f(x):", "    return x.name", "f(None)"] });
     const md = await report(root, [

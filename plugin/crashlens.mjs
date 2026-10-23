@@ -3156,6 +3156,8 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const target = targetOf(kind, message, joined, joined === crashLine ? crash.column : void 0);
   if (target === null) return null;
   steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
+  if (target.computed !== void 0)
+    steps.push(`The key is computed: ${c(target.computed)} evaluated to ${c(`'${target.key}'`)} (from the KeyError message).`);
   const follow = async (start, from) => {
     let name2 = start;
     let element2 = false;
@@ -3263,7 +3265,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
   }
   const readMatch = producer === null || element ? null : new RegExp(`^(${IDENT}(?:\\.${IDENT})*)\\s*(?:\\.get\\(\\s*["']([^"']+)["']|\\[\\s*["']([^"']+)["']\\s*\\])`).exec(producer.expr);
   const containerOf = (expr) => /^(.*?)(?:\.[A-Za-z_$][\w$]*|\[\s*["'][^"']+["']\s*\])$/.exec(expr)?.[1] ?? null;
-  const read = readMatch !== null && producer !== null ? { container: readMatch[1], key: readMatch[2] ?? readMatch[3], frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr } : target.key !== null && kind === "python-key-error" ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${JSON.stringify(target.key)}]` } : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null ? { container: containerOf(target.expr), key: lastFieldName(target.expr), frame: 0, file: crash.file, index: crash.line - 1, text: target.expr } : null;
+  const read = readMatch !== null && producer !== null ? { container: readMatch[1], key: readMatch[2] ?? readMatch[3], frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr } : target.key !== null && kind === "python-key-error" ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${target.computed ?? JSON.stringify(target.key)}]` } : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null ? { container: containerOf(target.expr), key: lastFieldName(target.expr), frame: 0, file: crash.file, index: crash.line - 1, text: target.expr } : null;
   let runtimeKeys = null;
   let runtimeMismatch = false;
   if (read !== null) {
@@ -3368,13 +3370,27 @@ function targetOf(kind, message, line, column) {
     (best, m) => Math.abs((m.index ?? 0) + m[0].length - column) < Math.abs((best.index ?? 0) + best[0].length - column) ? m : best
   );
   const expr = pick?.[1];
-  if (expr === void 0) return null;
+  if (expr === void 0) return kind === "python-key-error" && key !== null ? computedKey(line, key) : null;
   const root = new RegExp(`^${IDENT}`).exec(expr)?.[0];
   if (key === null && kind.startsWith("node-")) {
     const field = new RegExp(`\\.(${IDENT})$`).exec(expr)?.[1];
     if (field !== void 0) key = field;
   }
   return { expr, root, key };
+}
+function computedKey(line, key) {
+  const candidates = [];
+  for (const m of line.matchAll(new RegExp(`(${IDENT}(?:\\??\\.${IDENT})*)\\s*\\[`, "g"))) {
+    const inner = balanced(line, (m.index ?? 0) + m[0].length - 1);
+    if (inner === null || /^\s*(["'])[^"']*\1\s*$|^\s*-?\d+\s*$/.test(inner)) continue;
+    candidates.push({ expr: m[1], computed: inner.trim() });
+  }
+  const pieces = (computed) => [...computed.matchAll(/(["'])((?:(?!\1).)*)\1/g)].flatMap((m) => m[2].split(/\{[^}]*\}/)).filter((p) => p !== "");
+  const fitting = candidates.filter((c2) => pieces(c2.computed).every((p) => key.includes(p)));
+  const withPieces = fitting.filter((c2) => pieces(c2.computed).length > 0);
+  const chosen = withPieces.length === 1 ? withPieces[0] : fitting.length === 1 ? fitting[0] : void 0;
+  if (chosen === void 0) return null;
+  return { expr: chosen.expr, root: new RegExp(`^${IDENT}`).exec(chosen.expr)?.[0], key, computed: chosen.computed };
 }
 function functionStart(lines, index, fnName, lang) {
   const name = shortName(fnName);

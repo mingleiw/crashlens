@@ -64,6 +64,7 @@ sample has `customerId` instead. With that, **5 of 5 runs fixed `models.py`**.
 | --- | --- | --- |
 | Misleading comment at the crash, bug 3 files away (18 runs) | 6/18 root-cause fixes | **13/18** |
 | A data field read under the wrong name, 4 new held-out cases (20 runs) | 5/20 (10/40 over two batches) | **20/20** (the previous report: 9/20) |
+| A computed key (`record[prefix + "_ref"]`) the data spells differently (5 runs) | 5/10 over two batches | **5/5** (the previous report: 1/5) |
 | Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
 | Stripped binary + core dump: turns to the root cause | 4 | **1** |
 | Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
@@ -151,11 +152,11 @@ small crashing project twice: once with only the error output (A), once with
 the error output plus the crashlens report (B). Each diff is scored as a
 root-cause fix or a symptom guard.
 
-- **18 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+- **19 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
   id, a renamed field across a queue, an environment string used as a number,
   a missing `await`, a currency code two files away, shifted CSV columns, and
   data fields read under the wrong name (camelCase vs snake_case, a nested key).
-- **11 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+- **12 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
   were written before the check they test existed, with the bug one to three
   files from the crash and, in most, a misleading comment at the crash. The
   four payload cases were then used to fix one bug (a chained call split over
@@ -186,6 +187,12 @@ What we have seen so far:
   key) got 9/20 root-cause fixes; the report that names the key and the sample
   it is missing from got 20/20. In 6 of those runs the agent also kept a guard
   at the crash site.
+- **Computed keys:** a `KeyError` from `record[prefix + "_ref"]` used to get no
+  trace at all, since the key is not a literal. crashlens now takes the
+  evaluated key from the error message (`'billing_ref'`) and checks it like
+  any other: the previous report got 1/5 root-cause fixes, the new one 5/5.
+  Without crashlens the agent got 1/5 in one batch and 4/5 in another, a
+  reminder of how much single batches vary.
 - **Runtime values:** on three held-out cases where the failure output already
   printed the variables (pytest `--showlocals`, a Sentry event), the agent
   fixed the real bug 5/5 without crashlens too: with the values on screen, it

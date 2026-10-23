@@ -139,6 +139,8 @@ export async function traceValue(
   const target = targetOf(kind, message, joined, joined === crashLine ? crash.column : undefined);
   if (target === null) return null;
   steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
+  if (target.computed !== undefined)
+    steps.push(`The key is computed: ${c(target.computed)} evaluated to ${c(`'${target.key}'`)} (from the KeyError message).`);
 
   // Follow a variable back through assignments and call arguments, from frame `from` outward.
   // Stops (says nothing more) wherever the scope is unclear, rather than guess.
@@ -278,7 +280,7 @@ export async function traceValue(
     readMatch !== null && producer !== null
       ? { container: readMatch[1] as string, key: (readMatch[2] ?? readMatch[3]) as string, frame: Math.max(chain.frame, 0), file: producer.file, index: producer.index, text: producer.expr }
       : target.key !== null && kind === "python-key-error"
-        ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${JSON.stringify(target.key)}]` }
+        ? { container: target.expr, key: target.key, frame: 0, file: crash.file, index: crash.line - 1, text: `${target.expr}[${target.computed ?? JSON.stringify(target.key)}]` }
         : fieldAccess && lastFieldName(target.expr) !== null && containerOf(target.expr) !== null
           ? { container: containerOf(target.expr) as string, key: lastFieldName(target.expr) as string, frame: 0, file: crash.file, index: crash.line - 1, text: target.expr }
           : null;
@@ -387,7 +389,15 @@ export async function traceValue(
 const LOOKUP = /\.find\(|\.get\(|\.findOne\(|\.first\(|\.filter\(|\.search\(|\.match\(|\.query\(/;
 
 /** The expression that held the bad value on the failing line, its root variable, and the field read from it. */
-function targetOf(kind: string, message: string, line: string, column?: number): { expr: string; root: string; key: string | null } | null {
+interface Target {
+  readonly expr: string;
+  readonly root: string;
+  readonly key: string | null;
+  /** The key expression when the code computes it (`prefix + "_ref"`); `key` is then the evaluated key. */
+  readonly computed?: string;
+}
+
+function targetOf(kind: string, message: string, line: string, column?: number): Target | null {
   const path = `${IDENT}(?:\\??\\.${IDENT}|\\[[^\\]]+\\]|\\([^()]*\\))*`;
   let pattern: RegExp | null = null;
   let key: string | null = null;
@@ -420,7 +430,7 @@ function targetOf(kind: string, message: string, line: string, column?: number):
           Math.abs((m.index ?? 0) + m[0].length - column) < Math.abs((best.index ?? 0) + best[0].length - column) ? m : best,
         );
   const expr = pick?.[1];
-  if (expr === undefined) return null;
+  if (expr === undefined) return kind === "python-key-error" && key !== null ? computedKey(line, key) : null;
   const root = new RegExp(`^${IDENT}`).exec(expr)?.[0] as string;
   if (key === null && kind.startsWith("node-")) {
     // `user.profile.name` undefined: the field `profile` may be misnamed.
@@ -428,6 +438,28 @@ function targetOf(kind: string, message: string, line: string, column?: number):
     if (field !== undefined) key = field;
   }
   return { expr, root, key };
+}
+
+/**
+ * `record[prefix + "_ref"]` raised `KeyError: 'billing_ref'`: the key is computed, and the
+ * runtime already evaluated it. Find the subscript on the line whose key is an expression,
+ * preferring the one whose literal pieces ("_ref") appear in the evaluated key. Null when
+ * no subscript fits or several do equally well: say nothing rather than guess.
+ */
+function computedKey(line: string, key: string): Target | null {
+  const candidates: { expr: string; computed: string }[] = [];
+  for (const m of line.matchAll(new RegExp(`(${IDENT}(?:\\??\\.${IDENT})*)\\s*\\[`, "g"))) {
+    const inner = balanced(line, (m.index ?? 0) + m[0].length - 1);
+    if (inner === null || /^\s*(["'])[^"']*\1\s*$|^\s*-?\d+\s*$/.test(inner)) continue;
+    candidates.push({ expr: m[1] as string, computed: inner.trim() });
+  }
+  const pieces = (computed: string) =>
+    [...computed.matchAll(/(["'])((?:(?!\1).)*)\1/g)].flatMap((m) => (m[2] as string).split(/\{[^}]*\}/)).filter((p) => p !== "");
+  const fitting = candidates.filter((c) => pieces(c.computed).every((p) => key.includes(p)));
+  const withPieces = fitting.filter((c) => pieces(c.computed).length > 0);
+  const chosen = withPieces.length === 1 ? withPieces[0] : fitting.length === 1 ? fitting[0] : undefined;
+  if (chosen === undefined) return null;
+  return { expr: chosen.expr, root: new RegExp(`^${IDENT}`).exec(chosen.expr)?.[0] as string, key, computed: chosen.computed };
 }
 
 interface FunctionHead {

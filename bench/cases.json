@@ -322,6 +322,25 @@
         }
       ],
       "symptom": "userName\\?\\.|\\|\\| ?[\"'`]|\\?\\? ?[\"'`]|if \\(!body\\.userName"
+    },
+    "py-dynkey": {
+      "heldout": true,
+      "run": [
+        "python3",
+        "main.py"
+      ],
+      "bug": "reference_for builds the key as prefix + \"_ref\" (billing_ref); the importer writes billing_reference. One file from the crash, with a comment saying old exports lack the column.",
+      "root": [
+        {
+          "file": "refs.py",
+          "pattern": "_reference"
+        },
+        {
+          "file": "importer.py",
+          "pattern": "\"billing_ref\"|\"invoice_ref\""
+        }
+      ],
+      "symptom": "\\.get\\(|not in record|in record|except KeyError"
     }
   }
 }
