@@ -379,6 +379,130 @@
         }
       ],
       "symptom": "timeouts\\?\\.|\\?\\? ?\\{|\\|\\| ?\\{|if \\(!timeouts|\\?\\? ?\\d|\\|\\| ?\\d"
+    },
+    "java-email-lookup": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "CustomerRepository stores customers under the lowercased email but find() looks up the raw email, so a mixed-case order email finds nothing. Compiled without -g, so the NPE names <local2>. A comment at the crash says guest checkouts have no customer.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/CustomerRepository.java",
+          "pattern": "toLowerCase|equalsIgnoreCase|CASE_INSENSITIVE"
+        },
+        {
+          "file": "src/main/java/com/acme/InvoiceService.java",
+          "pattern": "toLowerCase"
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable"
+    },
+    "java-self-assign": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -g -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "PriceFormatter's constructor does `rates = rates`, assigning the parameter to itself, so the field stays null. Crash one call below the caller, with a comment saying rates can be missing for an unpriced currency.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/PriceFormatter.java",
+          "pattern": "this\\.rates\\s*="
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable|getOrDefault|emptyMap"
+    },
+    "java-properties-key": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -g -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "RegionResolver reads `region.default`, but app.properties defines `default.region`. A comment at the crash says the region is unset on developer machines and should fall back.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/RegionResolver.java",
+          "pattern": "\"default\\.region\""
+        },
+        {
+          "file": "src/main/resources/app.properties",
+          "pattern": "(^|\\n)region\\.default\\s*="
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable|requireNonNullElse|getProperty\\([^)]*,|us-east-1"
+    },
+    "java-boxed-key": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -g -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "OrderStore keeps a Map<Long, Order> but byId(int) calls orders.get(id), which boxes to Integer and never equals a Long key. Two files from the crash, with a comment saying archived orders are missing.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/OrderStore.java",
+          "pattern": "long id|Long id|\\(long\\)|Long\\.valueOf|longValue"
+        },
+        {
+          "file": "src/main/java/com/acme/Ticket.java",
+          "pattern": "long orderId"
+        },
+        {
+          "file": "src/main/java/com/acme/ShippingService.java",
+          "pattern": "\\(long\\)|Long\\.valueOf"
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable"
+    },
+    "java-handler-registry": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -g -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "Registry keys handlers by EventType.name() (ORDER_SHIPPED), but the dispatcher looks them up with the wire string (order.shipped). A comment at the crash says unknown types should be dropped. Written after the Java trace was implemented and not used to tune it.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/Registry.java",
+          "pattern": "toUpperCase|toLowerCase|replace\\(|valueOf|wire|Wire"
+        },
+        {
+          "file": "src/main/java/com/acme/Dispatcher.java",
+          "pattern": "toUpperCase|replace\\(|valueOf|wire\\w*\\(|Wire"
+        },
+        {
+          "file": "src/main/java/com/acme/App.java",
+          "pattern": "\"ORDER_SHIPPED\""
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable|getOrDefault"
+    },
+    "java-ctor-overload": {
+      "heldout": true,
+      "run": [
+        "sh",
+        "-c",
+        "unset JAVA_TOOL_OPTIONS; o=$(mktemp -d); javac -g -d $o $(find src -name '*.java') && java -cp $o com.acme.App; rm -rf $o"
+      ],
+      "bug": "UserFactory.fromSignup calls the User(String) constructor, which never sets profile, so getProfile() returns null. A comment at the crash says new accounts may not have a profile yet. Written after the Java trace was implemented and not used to tune it.",
+      "root": [
+        {
+          "file": "src/main/java/com/acme/UserFactory.java",
+          "pattern": "new Profile\\(|new User\\(id, "
+        },
+        {
+          "file": "src/main/java/com/acme/User.java",
+          "pattern": "this\\.profile\\s*=|profile\\s*=\\s*new Profile"
+        }
+      ],
+      "symptom": "== ?null|!= ?null|Optional|requireNonNull|ofNullable"
     }
   }
 }

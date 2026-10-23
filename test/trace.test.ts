@@ -504,6 +504,240 @@ describe("value trace", () => {
   });
 });
 
+describe("Java NullPointerException trace", () => {
+  const npe = (message: string, ...frames: string[]) =>
+    [`Exception in thread "main" java.lang.NullPointerException: ${message}`, ...frames.map((f) => `\tat ${f}`)].join("\n");
+  const P = "src/main/java/app";
+
+  it("maps <localN> to the variable by slot, past a long parameter and a closed block", async () => {
+    const root = project("java-slot", {
+      [`${P}/Account.java`]: ["package app;", "", "public record Account(String code, String name) {}"],
+      [`${P}/Ledger.java`]: [
+        "package app;",
+        "",
+        "import java.util.HashMap;",
+        "import java.util.Map;",
+        "",
+        "public class Ledger {",
+        "    private final Map<String, Account> accounts = new HashMap<>();",
+        "",
+        "    public void open(Account a) { accounts.put(a.code().trim(), a); }",
+        "",
+        "    public Account lookup(String code) { return accounts.get(code); }",
+        "",
+        "    public static String describe(Ledger ledger, long stamp, String code) {",
+        "        for (int i = 0; i < 2; i++) {",
+        '            String ignored = "x" + i;',
+        "        }",
+        "        Account account = ledger.lookup(code);",
+        "        return account.name() + stamp;",
+        "    }",
+        "}",
+      ],
+    });
+    const md = await report(root, npe('Cannot invoke "app.Account.name()" because "<local4>" is null', "app.Ledger.describe(Ledger.java:18)", "app.Main.main(Main.java:5)"));
+    assert.match(md, /`<local4>` in the message is the local variable `account`/);
+    assert.match(md, /`account` is assigned `ledger\.lookup\(code\)` at `src\/main\/java\/app\/Ledger\.java:17`/);
+    assert.match(hypotheses(md), /^- \*\*Key normalized on write, not on read\.\*\* `src\/main\/java\/app\/Ledger\.java:9` stores entries under `a\.code\(\)\.trim\(\)`.*without `trim\(\)`/);
+  });
+
+  it("counts every declarator in `String a = \"a\", b = null;` and multi-catch variables", async () => {
+    const root = project("java-slot-multi", {
+      [`${P}/Pair.java`]: [
+        "package app;",
+        "",
+        "public class Pair {",
+        "    public static int run(int x) {",
+        "        try {",
+        "            Integer.parseInt(\"1\");",
+        "        } catch (IllegalStateException | NumberFormatException e) {",
+        "            System.out.println(e);",
+        "        }",
+        "        String a = \"a\", b = null;",
+        "        return a.length() + b.length() + x;",
+        "    }",
+        "}",
+      ],
+    });
+    // javac: x = 0, the catch variable reuses slot 1 and is freed, a = 1, b = 2.
+    const md = await report(root, npe('Cannot invoke "String.length()" because "<local2>" is null', "app.Pair.run(Pair.java:11)"));
+    assert.match(md, /`<local2>` in the message is the local variable `b`/);
+    assert.match(hypotheses(md), /Assigned null\.\*\* `b` is set to `null` at `src\/main\/java\/app\/Pair\.java:10`/);
+  });
+
+  it("says nothing about a slot whose variable has the wrong type", async () => {
+    const root = project("java-slot-type", {
+      [`${P}/Report.java`]: ["package app;", "", "public class Report {", "    public static int size(String title) {", "        String body = load(title);", "        return body.length();", "    }", "    static String load(String t) { return t; }", "}"],
+    });
+    const md = await report(root, npe('Cannot invoke "app.Customer.tier()" because "<local1>" is null', "app.Report.size(Report.java:6)"));
+    assert.doesNotMatch(md, /in the message is the local variable/);
+    assert.equal(hypotheses(md), "");
+  });
+
+  it("follows a parameter to the caller that passed null, and reads a method that returns null", async () => {
+    const root = project("java-null-arg", {
+      [`${P}/Mailer.java`]: ["package app;", "", "public class Mailer {", "    public String subject(String user) {", "        return user.toUpperCase();", "    }", "}"],
+      [`${P}/Directory.java`]: [
+        "package app;",
+        "",
+        "public class Directory {",
+        "    public String owner(String team) {",
+        '        if (team.equals("ops")) {',
+        '            return "dana";',
+        "        }",
+        "        return null;",
+        "    }",
+        "}",
+      ],
+      [`${P}/Main.java`]: [
+        "package app;",
+        "",
+        "public class Main {",
+        "    public static void main(String[] args) {",
+        "        Directory directory = new Directory();",
+        "        Mailer mailer = new Mailer();",
+        "        String user = null;",
+        "        System.out.println(mailer.subject(user));",
+        '        String owner = directory.owner("billing");',
+        "        System.out.println(mailer.subject(owner));",
+        "    }",
+        "}",
+      ],
+    });
+    const fromLiteral = await report(root, npe('Cannot invoke "String.toUpperCase()" because "<local1>" is null', "app.Mailer.subject(Mailer.java:5)", "app.Main.main(Main.java:8)"));
+    assert.match(fromLiteral, /`user` is a parameter of `subject`, passed as `user` at `src\/main\/java\/app\/Main\.java:8`/);
+    assert.match(hypotheses(fromLiteral), /^- \*\*Assigned null\.\*\* `user` is set to `null` at `src\/main\/java\/app\/Main\.java:7`/);
+    const fromMethod = await report(root, npe('Cannot invoke "String.toUpperCase()" because "user" is null', "app.Mailer.subject(Mailer.java:5)", "app.Main.main(Main.java:10)"));
+    assert.match(hypotheses(fromMethod), /^- \*\*The method returns null on purpose\.\*\* `owner` returns `null` at `src\/main\/java\/app\/Directory\.java:8`/);
+  });
+
+  it("follows a caller's argument that is a field, and a this.field receiver", async () => {
+    const root = project("java-field-arg", {
+      [`${P}/Printer.java`]: ["package app;", "", "public class Printer {", "    public int width(String text) {", "        return text.length();", "    }", "}"],
+      [`${P}/Page.java`]: [
+        "package app;",
+        "",
+        "public class Page {",
+        "    private final Printer printer = new Printer();",
+        "    private String title;",
+        "    public Page(String title) {",
+        "        title = title;",
+        "    }",
+        "    public int layout() {",
+        "        return this.printer.width(title);",
+        "    }",
+        "}",
+      ],
+    });
+    const md = await report(root, npe('Cannot invoke "String.length()" because "text" is null', "app.Printer.width(Printer.java:5)", "app.Page.layout(Page.java:10)"));
+    assert.match(md, /`text` is a parameter of `width`, passed as `title` at `src\/main\/java\/app\/Page\.java:10`/);
+    assert.match(hypotheses(md), /^- \*\*The field is assigned to itself\.\*\* `src\/main\/java\/app\/Page\.java:7` reads `title = title;`/);
+  });
+
+  it("names a private field nothing assigns, but not an injected or non-private one", async () => {
+    const service = (field: string) => [
+      "package app;",
+      "",
+      "public class Service {",
+      field,
+      "    public int run() {",
+      "        return repo.count();",
+      "    }",
+      "}",
+    ];
+    const crash = (root: string) => report(root, npe('Cannot invoke "app.Repo.count()" because "this.repo" is null', "app.Service.run(Service.java:6)"));
+    const plain = project("java-field-plain", { [`${P}/Service.java`]: service("    private Repo repo;") });
+    assert.match(hypotheses(await crash(plain)), /^- \*\*The field is never assigned\.\*\* `repo` is declared at `src\/main\/java\/app\/Service\.java:4` with no initializer/);
+    for (const [name, field] of [["inject", "    @Autowired\n    private Repo repo;"], ["package", "    Repo repo;"], ["setter", "    private Repo repo;\n    void setRepo(Repo r) { this.repo = r; }"]]) {
+      const root = project(`java-field-${name}`, { [`${P}/Service.java`]: service(field as string) });
+      assert.doesNotMatch(hypotheses(await crash(root)), /never assigned/, name);
+    }
+  });
+
+  it("checks a properties key only against a file the class loads, and stays quiet when the key exists", async () => {
+    const settings = (file: string) => [
+      "package app;",
+      "",
+      "import java.util.Properties;",
+      "",
+      "public class Settings {",
+      "    private final Properties props = new Properties();",
+      `    Settings() throws Exception { props.load(Settings.class.getResourceAsStream("${file}")); }`,
+      "    public String get(String key) {",
+      "        return props.getProperty(key);",
+      "    }",
+      "}",
+    ];
+    const reader = ["package app;", "", "public class Reader {", "    static int port(Settings s) {", '        return Integer.parseInt(s.get("server.port").trim());', "    }", "}"];
+    const crash = (root: string) =>
+      report(root, npe('Cannot invoke "String.trim()" because the return value of "app.Settings.get(String)" is null', "app.Reader.port(Reader.java:5)"));
+    const typo = project("java-props-typo", {
+      [`${P}/Settings.java`]: settings("/app.properties"),
+      [`${P}/Reader.java`]: reader,
+      "src/main/resources/app.properties": ["server-port=8080"],
+    });
+    const typoReport = await crash(typo);
+    assert.match(hypotheses(typoReport), /^- \*\*Property key not in the file\.\*\*.*reads `server\.port`.*it has `server-port`/);
+    assert.doesNotMatch(typoReport, /8080/, "property values stay out of the report");
+    const present = project("java-props-ok", {
+      [`${P}/Settings.java`]: settings("/app.properties"),
+      [`${P}/Reader.java`]: reader,
+      "src/main/resources/app.properties": ["server.port=8080"],
+    });
+    assert.equal(hypotheses(await crash(present)), "");
+    const unnamed = project("java-props-unnamed", {
+      [`${P}/Settings.java`]: settings("").map((l) => l.replace('getResourceAsStream("")', "System.in")),
+      [`${P}/Reader.java`]: reader,
+      "src/main/resources/other.properties": ["server-port=8080"],
+    });
+    assert.equal(hypotheses(await crash(unnamed)), "");
+  });
+
+  it("flags an int key in a Map<Long, ...>, not a long one", async () => {
+    const store = (param: string) => [
+      "package app;",
+      "",
+      "import java.util.HashMap;",
+      "import java.util.Map;",
+      "",
+      "public class Store {",
+      "    private final Map<Long, String> names = new HashMap<>();",
+      `    public String name(${param} id) {`,
+      "        return names.get(id);",
+      "    }",
+      "    public int width(int id) {",
+      "        return name(id).length();",
+      "    }",
+      "}",
+    ];
+    const crash = (root: string) =>
+      report(root, npe('Cannot invoke "String.length()" because the return value of "app.Store.name(int)" is null', "app.Store.width(Store.java:12)"));
+    assert.match(hypotheses(await crash(project("java-box-int", { [`${P}/Store.java`]: store("int") }))), /^- \*\*Map key type differs\.\*\* `names` is a `Map<Long, String>`, but `id`.*is an `int`, boxed to `Integer`/);
+    const ok = hypotheses(await crash(project("java-box-long", { [`${P}/Store.java`]: store("long") })));
+    assert.doesNotMatch(ok, /Map key type differs/);
+    assert.match(ok, /The lookup found nothing/);
+  });
+
+  it("does not trace other Java exceptions or old-style NPEs without a message", async () => {
+    const root = project("java-other", { [`${P}/A.java`]: ["package app;", "", "public class A {", "    static void f(String s) {", "        s.length();", "    }", "}"] });
+    for (const text of [
+      'Exception in thread "main" java.lang.IllegalStateException: Cannot invoke "x" because "s" is null\n\tat app.A.f(A.java:5)',
+      'Exception in thread "main" java.lang.NullPointerException\n\tat app.A.f(A.java:5)',
+    ])
+      assert.doesNotMatch(await report(root, text), /Where the bad value came from/);
+  });
+
+  it("stays fast on a crafted file of long, header-like lines", async () => {
+    const junk = Array.from({ length: 400 }, () => `${"a ".repeat(999)}`);
+    const root = project("java-redos", {
+      [`${P}/Slow.java`]: ["package app;", "", "public class Slow {", ...junk, "    static void f(String s) {", ...junk.map((l) => `        ${l.slice(0, 1990)}`), "        s.length();", "    }", "}"],
+    });
+    const started = Date.now();
+    await report(root, npe('Cannot invoke "String.length()" because "<local0>" is null', `app.Slow.f(Slow.java:${805})`));
+    assert.ok(Date.now() - started < 5000, `took ${Date.now() - started}ms`);
+  });
+});
+
 describe("native hypotheses", () => {
   const base = { relevantRegisters: [], decompiled: [] } as unknown as TriageReport;
 

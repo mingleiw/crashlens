@@ -3145,12 +3145,554 @@ import { createInterface } from "node:readline";
 
 // src/source.ts
 import { execFile as execFile4 } from "node:child_process";
-import { readdir as readdir2, readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { basename as basename5, extname as extname2, isAbsolute, join as join4, relative as relative3, sep as sep2 } from "node:path";
+import { readdir as readdir2, readFile as readFile3, realpath, stat as stat3 } from "node:fs/promises";
+import { basename as basename6, extname as extname3, isAbsolute, join as join4, relative as relative4, sep as sep3 } from "node:path";
 
 // src/trace.ts
-import { readFile as readFile2 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname2, extname, join as join3, relative as relative2, sep } from "node:path";
+import { readFile as readFile2, stat as stat2 } from "node:fs/promises";
+import { basename as basename5, dirname as dirname3, extname as extname2, join as join3, relative as relative3, sep as sep2 } from "node:path";
+
+// src/traceJava.ts
+import { basename as basename4, dirname as dirname2, extname, relative as relative2, sep } from "node:path";
+var NPE = /^(?:[\w$.]+: )?Cannot (?:invoke "([^"]+)"|read field "([\w$]+)"|assign field "([\w$]+)"|load from \w+ array|store to \w+ array|read the array length|throw exception|enter synchronized block|exit synchronized block) because (?:the return value of "([^"]+)"|"([^"]+)") is null/;
+var ID = "[A-Za-z_$][\\w$]*";
+var MAX_METHOD_LINES = 200;
+var MAX_CLASS_LINES = 2e3;
+var MAX_HOPS = 6;
+var MAX_HEADER_LINE = 300;
+var MAX_PROPERTY_FILES = 50;
+var WIDE = /* @__PURE__ */ new Set(["long", "double"]);
+var BOXED = {
+  int: "Integer",
+  long: "Long",
+  short: "Short",
+  byte: "Byte",
+  char: "Character",
+  double: "Double",
+  float: "Float",
+  boolean: "Boolean"
+};
+var INJECTED = /@(?:Autowired|Inject|Resource|Value|Mock|MockBean|Spy|InjectMocks|PersistenceContext|Setter|Data|Builder|AllArgsConstructor|RequiredArgsConstructor|ConfigurationProperties)\b/;
+var NORMALIZE = /\.(?:toLowerCase|toUpperCase|trim|strip|intern)\s*\(|\bnormali[sz]e\w*\s*\(/;
+async function traceJava(message, frames, root, allFiles) {
+  const npe = NPE.exec(message);
+  const crash = frames[0];
+  if (npe === null || crash === void 0) return null;
+  const files = new Files(root);
+  const lines = await files.lines(crash.file);
+  if (lines === null || lines[crash.line - 1] === void 0) return null;
+  const at = (file, index2) => c(`${relative2(root, file)}:${index2 + 1}`);
+  const hypotheses = [];
+  const steps = [];
+  const code2 = [];
+  const show = async (m, role) => {
+    const body2 = (await files.lines(m.file))?.slice(m.start, Math.min(m.end + 1, m.start + 25));
+    if (body2 === void 0 || code2.some((k) => k.heading.includes(`:${m.start + 1} `))) return;
+    code2.push({ heading: `Code: ${relative2(root, m.file)}:${m.start + 1} (${m.name}), ${role}`, language: "java", lines: numbered(body2, m.start) });
+  };
+  const invoked = npe[1] ?? null;
+  const returnOf = npe[4] ?? null;
+  const culprit = npe[5] ?? null;
+  const crashMethod = await methodAt(files, crash.file, crash.line - 1, shortName(crash.function));
+  const result = () => hypotheses.length + steps.length === 0 ? null : { hypotheses, steps, code: code2 };
+  if (returnOf !== null) {
+    const name2 = /([\w$]+)\(([^)]*)\)$/.exec(returnOf);
+    if (name2 === null) return null;
+    const call = callOn(lines[crash.line - 1], name2[1]);
+    if (call === null) return null;
+    steps.push(`The null is the return value of ${c(call.text)} at ${at(crash.file, crash.line - 1)}.`);
+    await explainCall(call.text, crash.file, crash.line - 1, crashMethod, arity(name2[2]));
+    return result();
+  }
+  if (culprit === null) return null;
+  const field = new RegExp(`^(.*)\\.(${ID})$`).exec(culprit);
+  if (field !== null) {
+    const owner = field[1];
+    const fieldName = field[2];
+    let classFile = null;
+    if (owner === "this") classFile = crash.file;
+    else if (crashMethod !== null) {
+      const local = owner.startsWith("<local") ? null : await typeOf(files, owner, crashMethod, crash.line - 1);
+      const type = local ?? owner.slice(owner.lastIndexOf(".") + 1);
+      classFile = /^[A-Z]/.test(type) ? await classFor(type, crash.file, allFiles) : null;
+    }
+    steps.push(`The null is the field ${c(culprit)} at ${at(crash.file, crash.line - 1)}.`);
+    if (classFile !== null) await explainField(classFile, fieldName);
+    return result();
+  }
+  if (crashMethod === null) return null;
+  let name = culprit;
+  const slot = /^<local(\d+)>$/.exec(culprit);
+  if (slot !== null) {
+    const resolved = await localForSlot(files, crashMethod, crash.line - 1, Number(slot[1]), invoked);
+    if (resolved === null) return null;
+    name = resolved;
+    steps.push(`${c(culprit)} in the message is the local variable ${c(name)} (slot ${slot[1]}; the class was compiled without \`-g\`, so the JVM only knows the slot).`);
+  }
+  steps.push(`The null is ${c(name)} at ${at(crash.file, crash.line - 1)}.`);
+  let method = crashMethod;
+  let index = crash.line - 1;
+  for (let hop = 0, f = 0; hop < MAX_HOPS; hop++) {
+    const assigned = await assignmentBefore(files, method, index, name);
+    if (assigned !== null) {
+      steps.push(`${c(name)} is assigned ${c(assigned.expr)} at ${at(method.file, assigned.index)}.`);
+      if (/^\s*null\s*$/.test(assigned.expr)) {
+        hypotheses.push(`**Assigned null.** ${c(name)} is set to \`null\` at ${at(method.file, assigned.index)} and not reassigned before ${at(crash.file, crash.line - 1)}.`);
+        return result();
+      }
+      const simple2 = new RegExp(`^(${ID})$`).exec(assigned.expr);
+      if (simple2 !== null && simple2[1] !== "this") {
+        if (!await isLocal(method, simple2[1], assigned.index)) {
+          await explainField(method.file, simple2[1]);
+          return result();
+        }
+        name = simple2[1];
+        index = assigned.index;
+        continue;
+      }
+      const thisField = new RegExp(`^(?:this\\.)?(${ID})$`).exec(assigned.expr);
+      if (thisField !== null) await explainField(method.file, thisField[1]);
+      else await explainCall(assigned.expr, method.file, assigned.index, method, null);
+      return result();
+    }
+    const param = method.params.findIndex((p) => p.name === name);
+    const caller = frames[f + 1];
+    if (param === -1 || caller === void 0) return result();
+    const callerLines = await files.lines(caller.file);
+    const args = callerLines === null ? null : callArgs(callerLines[caller.line - 1] ?? "", method.name);
+    const arg = args?.[param];
+    const callerMethod = await methodAt(files, caller.file, caller.line - 1, shortName(caller.function));
+    if (arg === void 0 || callerMethod === null) return result();
+    steps.push(`${c(name)} is a parameter of ${c(method.name)}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
+    f++;
+    method = callerMethod;
+    index = caller.line - 1;
+    const simple = new RegExp(`^(?:this\\.)?(${ID})$`).exec(arg);
+    if (simple === null) {
+      await explainCall(arg, caller.file, caller.line - 1, callerMethod, null);
+      return result();
+    }
+    if (arg.startsWith("this.") || !await isLocal(callerMethod, simple[1], caller.line - 1)) {
+      await explainField(caller.file, simple[1]);
+      return result();
+    }
+    name = simple[1];
+  }
+  return result();
+  async function isLocal(m, n, line) {
+    return m.params.some((p) => p.name === n) || (await localsAt(files, m, line + 1)).some((l) => l.name === n);
+  }
+  async function explainCall(expr, file, index2, inMethod, argCount) {
+    const call = new RegExp(`^(?:(this|${ID}(?:\\.${ID})*)\\s*\\.\\s*)?(${ID})\\s*\\(`).exec(expr.trim());
+    if (call === null) return;
+    const receiver = (call[1] ?? "this").replace(/^this\.(?=.)/, "");
+    const callee2 = call[2];
+    const args = callArgs(expr, callee2) ?? [];
+    if (callee2 === "get" || callee2 === "getProperty") {
+      const lookup = { map: receiver, key: args[0] ?? "", file, index: index2, classFile: file, method: inMethod };
+      if (args.length === 1 && await explainLookup(lookup, callee2)) return;
+    }
+    const type = receiver === "this" ? null : inMethod === null ? null : await typeOf(files, receiver, inMethod, index2);
+    const classFile = receiver === "this" ? file : type !== null ? await classFor(type, file, allFiles) : /^[A-Z]/.test(receiver) ? await classFor(receiver, file, allFiles) : null;
+    if (classFile === null) return;
+    const def = await methodNamed(files, classFile, callee2, argCount ?? args.length);
+    if (def === null) return;
+    await show(def, "where the null came from");
+    const body2 = await files.lines(def.file) ?? [];
+    for (let i = def.start; i <= def.end; i++) {
+      const ret = /(?:^\s*|[{;]\s*)return\s+(.+?);\s*(?:\}\s*)*(?:\/\/.*)?$/.exec(body2[i] ?? "");
+      if (ret === null) continue;
+      const value = ret[1].trim();
+      if (value === "null") {
+        steps.push(`${c(`${def.name}(...)`)} returns \`null\` at ${at(def.file, i)}.`);
+        hypotheses.push(
+          `**The method returns null on purpose.** ${c(def.name)} returns \`null\` at ${at(def.file, i)}, and ${at(file, index2)} uses the result without checking it. Find out which case reached that return before guarding the crash site.`
+        );
+        return;
+      }
+      const inner = new RegExp(`^(${ID}(?:\\.${ID})*)\\s*\\.\\s*(get|getProperty)\\s*\\(`).exec(value);
+      if (inner === null) continue;
+      const innerArgs = callArgs(value, inner[2]) ?? [];
+      if (innerArgs.length !== 1) continue;
+      steps.push(`${c(`${def.name}(...)`)} returns ${c(value)} at ${at(def.file, i)}.`);
+      const keyParam = def.params.findIndex((p) => p.name === innerArgs[0]);
+      const lookup = {
+        map: inner[1],
+        key: innerArgs[0],
+        file: def.file,
+        index: i,
+        classFile: def.file,
+        method: def
+      };
+      await explainLookup(lookup, inner[2], keyParam === -1 ? null : { arg: args[keyParam] ?? null, param: def.params[keyParam], file, index: index2 });
+      return;
+    }
+  }
+  async function explainLookup(lookup, how, passed = null) {
+    const classLines = await files.lines(lookup.classFile) ?? [];
+    const mapName = lookup.map.replace(/^this\./, "");
+    const mapType = await declaredType(files, lookup.classFile, mapName, lookup.method, lookup.index);
+    const keyType = passed?.param.type ?? (lookup.method === null ? null : await typeOf(files, lookup.key, lookup.method, lookup.index));
+    const at2 = at(lookup.file, lookup.index);
+    if (how === "getProperty") {
+      const literal = /^"([^"\\]+)"$/.exec(passed?.arg ?? lookup.key)?.[1];
+      if (literal === void 0) return false;
+      const props = await propertyFiles(classLines);
+      if (props.length === 0) return false;
+      const keys = props.flatMap((p) => p.keys.map((k) => ({ ...k, file: p.file })));
+      if (keys.some((k) => k.key === literal)) return false;
+      const near = keys.filter((k) => similarKey(k.key, literal)).slice(0, 3);
+      const where = passed === null ? at2 : at(passed.file, passed.index);
+      const fileList = [...new Set(props.map((p) => c(relative2(root, p.file))))].join(", ");
+      hypotheses.push(
+        near.length > 0 ? `**Property key not in the file.** ${where} reads ${c(literal)}, but ${fileList} has no such key; it has ${near.map((k) => `${c(k.key)} (${at(k.file, k.index)})`).join(", ")}. \`getProperty\` returns \`null\` for a missing key: fix the name on one side rather than defaulting it.` : `**Property key not in the file.** ${where} reads ${c(literal)}, which ${fileList} does not set, so \`getProperty\` returns \`null\`. Add the key or fix its name before defaulting it.`
+      );
+      return true;
+    }
+    const generics = mapType === null ? null : /^(?:[\w.]*\.)?(?:Map|HashMap|LinkedHashMap|TreeMap|ConcurrentHashMap|SortedMap|NavigableMap)\s*<([\s\S]+)>$/.exec(mapType.replace(/\s+/g, " "));
+    if (generics === null) return false;
+    const [mapKey] = splitTopLevel(generics[1], true).map((t) => t.trim());
+    if (mapKey === void 0) return false;
+    steps.push(`${c(lookup.map)} is a ${c(mapType)}; ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} returns \`null\` when no entry matches.`);
+    const keyBase = keyType?.replace(/^final\s+/, "").trim() ?? null;
+    const boxedKey = keyBase === null ? null : BOXED[keyBase] ?? keyBase;
+    const numeric = /* @__PURE__ */ new Set(["Integer", "Long", "Short", "Byte", "Double", "Float", "Character"]);
+    if (boxedKey !== null && numeric.has(boxedKey) && numeric.has(mapKey) && boxedKey !== mapKey) {
+      hypotheses.push(
+        `**Map key type differs.** ${c(lookup.map)} is a ${c(mapType)}, but ${c(lookup.key)} at ${at2} is ${/^[aeiouAEIOU]/.test(keyBase) ? "an" : "a"} ${c(keyBase)}${keyBase === boxedKey ? "" : `, boxed to ${c(boxedKey)}`}. \`Map.get\` takes any \`Object\`, and an ${c(boxedKey)} never equals a ${c(mapKey)}, so this lookup always returns \`null\`. Use a ${c(mapKey === "Long" ? "long" : mapKey)} key.`
+      );
+      return true;
+    }
+    const put = new RegExp(`\\b(?:this\\.)?${escape(mapName)}\\s*\\.\\s*(?:put|putIfAbsent|computeIfAbsent)\\s*\\(`);
+    for (let i = 0; i < Math.min(classLines.length, MAX_CLASS_LINES); i++) {
+      const line = classLines[i];
+      const m = put.exec(line);
+      if (m === null) continue;
+      const stored = splitTopLevel(balanced(line, m.index + m[0].length - 1) ?? "")[0]?.trim();
+      const transform = stored === void 0 ? null : NORMALIZE.exec(stored);
+      if (stored === void 0 || transform === null || NORMALIZE.test(lookup.key)) continue;
+      const fn = transform[0].replace(/^\./, "").replace(/\s*\($/, "");
+      if (passed?.arg != null && NORMALIZE.test(passed.arg)) continue;
+      hypotheses.push(
+        `**Key normalized on write, not on read.** ${at(lookup.classFile, i)} stores entries under ${c(stored)}, but ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} looks up the key as given, without ${c(`${fn}()`)}. A key that differs only in ${/Case/.test(fn) ? "case" : "spacing or form"} finds nothing. Apply the same ${c(fn)} on lookup.`
+      );
+      return true;
+    }
+    hypotheses.push(
+      `**The lookup found nothing.** ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} returns \`null\` when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
+    );
+    return true;
+  }
+  async function explainField(classFile, fieldName) {
+    const classLines = (await files.lines(classFile) ?? []).slice(0, MAX_CLASS_LINES);
+    const decl = fieldDeclaration(classLines, fieldName);
+    if (decl === null) return;
+    steps.push(`${c(fieldName)} is declared at ${at(classFile, decl.index)}: ${c(classLines[decl.index].trim())}`);
+    const annotated = INJECTED.test(classLines.slice(Math.max(0, decl.index - 3), decl.index + 1).join("\n")) || INJECTED.test(classLines.slice(0, decl.classStart + 1).join("\n"));
+    const self = new RegExp(`^\\s*${escape(fieldName)}\\s*=\\s*${escape(fieldName)}\\s*;`);
+    const write = new RegExp(`(?:\\bthis\\s*\\.\\s*|(?<![\\w$.])(?:${ID}\\s*\\.\\s*)?)${escape(fieldName)}\\s*=(?!=)`);
+    const writes = [];
+    let selfAt = -1;
+    for (let i = 0; i < classLines.length; i++) {
+      if (i === decl.index) continue;
+      const line = stripCode(classLines[i]);
+      if (self.test(line)) selfAt = i;
+      else if (write.test(line) && !new RegExp(`^\\s*(?:final\\s+)?[\\w<>\\[\\], ?.]+\\s+${escape(fieldName)}\\s*=`).test(line)) writes.push(i);
+    }
+    if (selfAt !== -1 && writes.length === 0) {
+      hypotheses.push(
+        `**The field is assigned to itself.** ${at(classFile, selfAt)} reads ${c(classLines[selfAt].trim())}: the parameter ${c(fieldName)} hides the field, so this assigns the parameter to itself and the field stays \`null\`. Write ${c(`this.${fieldName} = ${fieldName};`)}.`
+      );
+      return;
+    }
+    if (annotated || decl.initialized || !decl.private) return;
+    if (writes.length === 0) {
+      hypotheses.push(
+        `**The field is never assigned.** ${c(fieldName)} is declared at ${at(classFile, decl.index)} with no initializer, and nothing in ${c(basename4(classFile))} assigns it, so it is always \`null\`. Set it in the constructor.`
+      );
+      return;
+    }
+    const nullWrite = writes.find((i) => new RegExp(`${escape(fieldName)}\\s*=\\s*null\\s*;`).test(classLines[i]));
+    if (nullWrite !== void 0) steps.push(`${c(fieldName)} is set to \`null\` at ${at(classFile, nullWrite)}.`);
+  }
+  async function propertyFiles(classLines) {
+    const all = (await allFiles()).filter((f) => extname(f) === ".properties").slice(0, MAX_PROPERTY_FILES);
+    const named = /* @__PURE__ */ new Set();
+    for (const line of classLines.slice(0, MAX_CLASS_LINES))
+      for (const m of line.matchAll(/"([^"\s]*\.properties)"/g)) named.add(basename4(m[1]));
+    if (named.size === 0) return [];
+    const chosen = all.filter((f) => named.has(basename4(f)));
+    const out = [];
+    for (const file of chosen) {
+      const props = await files.lines(file);
+      if (props === null) continue;
+      const keys = [];
+      props.forEach((line, index2) => {
+        const m = /^\s*([^#!\s=:][^=:\s]*)\s*[=:\s]/.exec(line);
+        if (m !== null) keys.push({ key: m[1], index: index2 });
+      });
+      out.push({ file, keys });
+    }
+    return out;
+  }
+}
+function similarKey(a, b) {
+  const words = (s) => s.toLowerCase().split(/[._-]+/).filter(Boolean).sort().join(".");
+  if (words(a) === words(b)) return true;
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  if (x.replace(/[._-]/g, "") === y.replace(/[._-]/g, "")) return true;
+  return Math.abs(x.length - y.length) <= 1 && editDistance(x, y) <= 1;
+}
+function editDistance(a, b) {
+  if (a.length > 200 || b.length > 200) return Infinity;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++)
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = row;
+  }
+  return prev[b.length];
+}
+function shortName(fn) {
+  const parts = fn.split(".");
+  const last = parts[parts.length - 1];
+  return last === "<init>" ? (parts[parts.length - 2] ?? "").split("$").pop() : last;
+}
+function arity(types) {
+  return types.trim() === "" ? 0 : splitTopLevel(types, true).length;
+}
+function escape(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function stripCode(line) {
+  return line.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:\\.|[^'\\])+'/g, "''").replace(/\/\/.*$/, "");
+}
+function callArgs(text, name) {
+  const m = new RegExp(`(?:^|[^\\w$])${escape(name)}\\s*\\(`).exec(text);
+  if (m === null) return null;
+  const inner = balanced(text, m.index + m[0].length - 1);
+  return inner === null ? null : splitTopLevel(inner).map((a) => a.trim());
+}
+function callOn(line, name) {
+  const m = new RegExp(`((?:this|${ID})(?:\\s*\\.\\s*${ID})*\\s*\\.\\s*)?(?<![\\w$])${escape(name)}\\s*\\(`).exec(line);
+  if (m === null) return null;
+  const inner = balanced(line, m.index + m[0].length - 1);
+  return inner === null ? null : { text: line.slice(m.index, m.index + m[0].length) + inner + ")" };
+}
+var HEADER2 = new RegExp(
+  `^\\s*(?:@${ID}(?:\\([^)]*\\))?\\s+)*((?:(?:public|protected|private|static|final|synchronized|abstract|native|default|strictfp)\\s+)*)(?:<[^>]*>\\s+)?([\\w$.<>\\[\\], ?]+?\\s+)?(${ID})\\s*\\(`
+);
+var NOT_A_METHOD = /^(?:return|new|throw|else|if|for|while|switch|catch|synchronized|do|try|case)$/;
+async function methodHeaderAt(files, file, i, name) {
+  const lines = await files.lines(file);
+  const line = lines?.[i];
+  if (lines === null || line === void 0) return null;
+  if (line.length > MAX_HEADER_LINE) return null;
+  const m = HEADER2.exec(stripCode(line));
+  if (m === null) return null;
+  const found = m[3];
+  const returns = (m[2] ?? "").trim();
+  if (name !== null && found !== name || NOT_A_METHOD.test(found) || NOT_A_METHOD.test(returns) || returns === "" && !/^[A-Z]/.test(found)) return null;
+  const head = lines.slice(i, i + 8).map(stripCode).join("\n");
+  const open3 = head.indexOf("(", head.indexOf(found));
+  const inner = balanced(head, open3);
+  if (inner === null) return null;
+  const after = head.slice(open3 + inner.length + 2);
+  if (!/^\s*(?:throws\s+[\w$.,\s<>]+)?\{/.test(after)) return null;
+  const params2 = [];
+  for (const raw of splitTopLevel(inner, true)) {
+    const p = raw.replace(/@[\w$.]+(?:\([^)]*\))?\s*/g, "").replace(/\bfinal\s+/, "").trim();
+    const pm = new RegExp(`^([\\s\\S]+?)\\s+(${ID})$`).exec(p);
+    if (pm === null) return null;
+    params2.push({ type: pm[1].replace(/\s+/g, " ").replace("...", "[]"), name: pm[2] });
+  }
+  let depth = 0;
+  let opened = false;
+  let end = -1;
+  for (let j = i; j < Math.min(lines.length, i + MAX_METHOD_LINES); j++) {
+    for (const ch of stripCode(lines[j])) {
+      if (ch === "{") {
+        depth++;
+        opened = true;
+      } else if (ch === "}") depth--;
+    }
+    if (opened && depth <= 0) {
+      end = j;
+      break;
+    }
+  }
+  if (end === -1) return null;
+  return { name: found, file, start: i, end, static: /\bstatic\b/.test(m[1] ?? ""), returns, params: params2 };
+}
+async function methodAt(files, file, index, name) {
+  if (name.includes("$") || name === "<clinit>") return null;
+  for (let i = index; i >= Math.max(0, index - MAX_METHOD_LINES); i--) {
+    const m = await methodHeaderAt(files, file, i, name);
+    if (m !== null && m.end >= index) return m;
+  }
+  return null;
+}
+async function methodNamed(files, file, name, count) {
+  const lines = await files.lines(file) ?? [];
+  const found = [];
+  for (let i = 0; i < Math.min(lines.length, MAX_CLASS_LINES); i++) {
+    if (!lines[i].includes(name)) continue;
+    const m = await methodHeaderAt(files, file, i, name);
+    if (m !== null && m.params.length === count) found.push(m);
+  }
+  return found.length === 1 ? found[0] : null;
+}
+async function localsAt(files, method, index) {
+  const lines = await files.lines(method.file) ?? [];
+  const scopes = [[]];
+  const elsewhere = [false];
+  const decl = new RegExp(`(?:^\\s*|[;({|]\\s*)(?:final\\s+)?((?:${ID})(?:\\s*\\.\\s*${ID})*(?:\\s*<[^;=()]*>)?(?:\\s*\\[\\s*\\])*)\\s+(${ID})\\s*(?=[=;:,)])`, "g");
+  let started = false;
+  for (let i = method.start; i < index && i <= method.end; i++) {
+    let line = stripCode(lines[i]);
+    if (!started) {
+      const brace = line.indexOf("{", line.indexOf(")"));
+      if (brace === -1) continue;
+      started = true;
+      line = line.slice(brace + 1);
+    }
+    const found = /* @__PURE__ */ new Map();
+    for (const m of line.matchAll(decl)) {
+      const type = m[1].replace(/\s+/g, "");
+      if (NOT_A_METHOD.test(type) || /^(?:throw|new|else|case|instanceof|yield)$/.test(type)) continue;
+      const end = (m.index ?? 0) + m[0].length;
+      found.set(end - 1, { type, name: m[2], index: i });
+      for (const more of moreDeclarators(line, end)) found.set(more.at, { type, name: more.name, index: i });
+    }
+    let header = [];
+    for (let k = 0; k < line.length; k++) {
+      const local = found.get(k);
+      if (local !== void 0 && !elsewhere.includes(true)) {
+        if (/\b(?:for|catch|try)\s*\([^)]*$/.test(line.slice(0, k))) header.push(local);
+        else scopes[scopes.length - 1].push(local);
+      }
+      if (line[k] === "{") {
+        const before = line.slice(0, k);
+        scopes.push(header);
+        elsewhere.push(/->\s*$|\bnew\s+[\w$.]+\s*(?:<[^>]*>\s*)?\(.*\)\s*$|\b(?:class|interface|enum|record)\s+[\w$]+[^{]*$/.test(before));
+        header = [];
+      } else if (line[k] === "}" && scopes.length > 1) {
+        scopes.pop();
+        elsewhere.pop();
+      }
+    }
+  }
+  return scopes.flat();
+}
+function moreDeclarators(line, from) {
+  const out = [];
+  let depth = 0;
+  for (let k = from; k < line.length; k++) {
+    const ch = line[k];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (--depth < 0) break;
+    } else if (ch === ";" && depth === 0) break;
+    else if (ch === "," && depth === 0) {
+      const m = new RegExp(`^\\s*(${ID})\\s*(?:=(?!=)|[,;]|$)`).exec(line.slice(k + 1));
+      if (m !== null) out.push({ name: m[1], at: k + m[0].indexOf(m[1]) + m[1].length });
+    }
+  }
+  return out;
+}
+async function localForSlot(files, method, index, n, invoked) {
+  const ordered = [...method.static ? [] : [{ type: "this", name: "this" }], ...method.params, ...await localsAt(files, method, index)];
+  let slot = 0;
+  let found = null;
+  for (const v of ordered) {
+    if (slot === n) {
+      found = v;
+      break;
+    }
+    slot += WIDE.has(v.type) ? 2 : 1;
+  }
+  const owner = invoked === null ? null : /([\w$]+)\.[\w$]+\([^)]*\)$/.exec(invoked)?.[1] ?? null;
+  const fits = (v) => owner === null || v.type === "var" || v.type.replace(/<.*$/, "").split(".").pop() === owner;
+  if (found !== null && found.name !== "this" && fits(found)) return found.name;
+  if (owner === null) return null;
+  const typed = ordered.filter((v) => v.name !== "this" && v.type !== "var" && fits(v));
+  return typed.length === 1 ? typed[0].name : null;
+}
+async function assignmentBefore(files, method, index, name) {
+  const lines = await files.lines(method.file) ?? [];
+  const pattern = new RegExp(`(?:^|[;{(]|\\s)(?<![\\w$.])${escape(name)}\\s*=(?!=)\\s*([\\s\\S]*)$`);
+  for (let i = index - 1; i > method.start; i--) {
+    const line = stripCode(lines[i]);
+    const m = pattern.exec(line);
+    if (m === null) continue;
+    let expr = m[1];
+    for (let j = i + 1; !expr.includes(";") && j < Math.min(i + 6, index); j++) expr += ` ${stripCode(lines[j]).trim()}`;
+    const semi = topLevelSemicolon(expr);
+    if (semi === -1) return null;
+    return { expr: expr.slice(0, semi).trim(), index: i };
+  }
+  return null;
+}
+function topLevelSemicolon(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ";" && depth === 0) return i;
+  }
+  return -1;
+}
+async function typeOf(files, name, method, index) {
+  if (!new RegExp(`^${ID}$`).test(name)) return null;
+  const param = method.params.find((p) => p.name === name);
+  if (param !== void 0) return param.type;
+  const local = (await localsAt(files, method, index)).reverse().find((l) => l.name === name);
+  if (local !== void 0) return local.type === "var" ? null : local.type;
+  return declaredType(files, method.file, name, null, index);
+}
+async function declaredType(files, file, name, method, index) {
+  if (method !== null) {
+    const t = await typeOf(files, name, method, index);
+    if (t !== null) return t;
+  }
+  const decl = fieldDeclaration((await files.lines(file) ?? []).slice(0, MAX_CLASS_LINES), name);
+  return decl?.type ?? null;
+}
+function fieldDeclaration(lines, name) {
+  const pattern = new RegExp(`^\\s*(?:@${ID}(?:\\([^)]*\\))?\\s+)*((?:(?:public|protected|private|static|final|transient|volatile)\\s+)*)([\\w$.]+(?:\\s*<[^;=()]*>)?(?:\\s*\\[\\s*\\])*)\\s+${escape(name)}\\s*(=|;)`);
+  let depth = 0;
+  let classStart = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripCode(lines[i]);
+    if (depth === 1) {
+      const m = pattern.exec(line);
+      if (m !== null && !/\breturn\b/.test(m[2]))
+        return { index: i, type: m[2].replace(/\s+/g, " ").replace(/\s*([<>,])\s*/g, (s) => s.trim() === "," ? ", " : s.trim()), initialized: m[3] === "=" && !/=\s*null\s*;/.test(line), private: /\bprivate\b/.test(m[1] ?? ""), classStart };
+    }
+    for (const ch of line) {
+      if (ch === "{") {
+        if (depth === 0) classStart = i;
+        depth++;
+      } else if (ch === "}") depth--;
+    }
+  }
+  return null;
+}
+async function classFor(type, near, allFiles) {
+  const simple = type.replace(/<[\s\S]*$/, "").split(".").pop();
+  if (simple === void 0 || !/^[A-Z][\w$]*$/.test(simple)) return null;
+  const matches = (await allFiles()).filter((f) => basename4(f) === `${simple}.java`);
+  const local = matches.filter((f) => dirname2(f) === dirname2(near));
+  if (local.length === 1) return local[0];
+  if (matches.length === 1) return matches[0];
+  const qualified = type.includes(".") ? matches.filter((f) => f.endsWith(`${sep}${type.replace(/<[\s\S]*$/, "").split(".").join(sep)}.java`)) : [];
+  return qualified.length === 1 ? qualified[0] : null;
+}
+
+// src/trace.ts
 var LANG = {
   ".py": "python",
   ".js": "js",
@@ -3161,7 +3703,7 @@ var LANG = {
   ".jsx": "js"
 };
 var MAX_BODY_LINES = 25;
-var MAX_CLASS_LINES = 300;
+var MAX_CLASS_LINES2 = 300;
 var MAX_SCANNED_FILES = 3e3;
 var MAX_FILE_BYTES = 1024 * 1024;
 var IDENT = "[A-Za-z_$][\\w$]*";
@@ -3180,7 +3722,8 @@ var OPERAND = /unsupported operand type|can only concatenate|must be str|must be
 async function traceValue(kind, message, frames, root, allFiles) {
   const crash = frames[0];
   if (crash === void 0) return null;
-  const lang = LANG[extname(crash.file)];
+  if (extname2(crash.file) === ".java") return kind === "java-null-pointer" ? traceJava(message, frames, root, allFiles) : null;
+  const lang = LANG[extname2(crash.file)];
   if (lang === void 0) return null;
   const files = new Files(root);
   const crashLine = (await files.lines(crash.file))?.[crash.line - 1];
@@ -3188,11 +3731,11 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const hypotheses = [];
   const steps = [];
   const code2 = [];
-  const at = (file, index) => c(`${relative2(root, file)}:${index + 1}`);
+  const at = (file, index) => c(`${relative3(root, file)}:${index + 1}`);
   const addDefinition = (def2, role) => {
     if (code2.some((c2) => c2.heading.includes(`(${def2.name})`))) return;
     code2.push({
-      heading: `Code: ${relative2(root, def2.file)}:${def2.start + 1} (${def2.name}), ${role}`,
+      heading: `Code: ${relative3(root, def2.file)}:${def2.start + 1} (${def2.name}), ${role}`,
       language: lang === "python" ? "python" : "javascript",
       lines: numbered(def2.lines, def2.start)
     });
@@ -3285,13 +3828,13 @@ async function traceValue(kind, message, frames, root, allFiles) {
       const caller = frames[f + 1];
       const callerLine = caller === void 0 ? void 0 : (await files.lines(caller.file))?.[caller.line - 1];
       if (caller === void 0 || callerLine === void 0) {
-        steps.push(`${c(name2)} is a parameter of ${c(shortName(frame2.function))}; its caller is not in the stack.`);
+        steps.push(`${c(name2)} is a parameter of ${c(shortName2(frame2.function))}; its caller is not in the stack.`);
         break;
       }
-      const args = callArgs(callerLine, shortName(frame2.function));
+      const args = callArgs2(callerLine, shortName2(frame2.function));
       const arg = args === null ? null : argumentFor(fn, args, name2, lang);
       if (arg === null) break;
-      steps.push(`${c(name2)} is a parameter of ${c(shortName(frame2.function))}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
+      steps.push(`${c(name2)} is a parameter of ${c(shortName2(frame2.function))}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
       const simple = new RegExp(`^(${IDENT})$`).exec(arg);
       if (simple === null && throughField(arg)) continue;
       const produced = simple === null ? offCall(arg) : null;
@@ -3462,7 +4005,7 @@ function targetOf(kind, message, line, column) {
   if (kind === "node-undefined-access" || kind === "node-undefined-write") {
     const prop = /\((?:reading|setting) '(.*)'\)/.exec(message)?.[1];
     if (prop === void 0) return null;
-    pattern = /^\d+$/.test(prop) ? new RegExp(`(${path})\\s*\\[\\s*${prop}\\s*\\]`) : new RegExp(`(${path})\\s*\\??\\.\\s*${escape(prop)}\\b`);
+    pattern = /^\d+$/.test(prop) ? new RegExp(`(${path})\\s*\\[\\s*${prop}\\s*\\]`) : new RegExp(`(${path})\\s*\\??\\.\\s*${escape2(prop)}\\b`);
   } else if (kind === "python-none") {
     const attr = /has no attribute '(\w+)'/.exec(message)?.[1];
     pattern = attr !== void 0 ? new RegExp(`(${path})\\.${attr}\\b`) : /not iterable/.test(message) ? new RegExp(`\\bin\\s+(${path})`) : new RegExp(`(${path})\\s*\\[`);
@@ -3470,7 +4013,7 @@ function targetOf(kind, message, line, column) {
     const quoted = /['"](.*)['"]\s*$/.exec(message.trim());
     key = quoted?.[1] ?? null;
     if (key === null) return null;
-    pattern = new RegExp(`(${path})\\s*\\[\\s*['"]${escape(key)}['"]\\s*\\]`);
+    pattern = new RegExp(`(${path})\\s*\\[\\s*['"]${escape2(key)}['"]\\s*\\]`);
   }
   if (pattern === null) return null;
   const matches = [...line.matchAll(new RegExp(pattern.source, "g"))];
@@ -3501,9 +4044,9 @@ function computedKey(line, key) {
   return { expr: chosen.expr, root: new RegExp(`^${IDENT}`).exec(chosen.expr)?.[0], key, computed: chosen.computed };
 }
 function functionStart(lines, index, fnName, lang) {
-  const name = shortName(fnName);
+  const name = shortName2(fnName);
   if (name === "" || name.includes("<")) return null;
-  const n = escape(name);
+  const n = escape2(name);
   const generics = "(?:<[^>()]*>)?";
   const patterns = lang === "python" ? [new RegExp(`^\\s*(?:async\\s+)?def\\s+${n}\\s*\\(`)] : [
     new RegExp(`function\\s*\\*?\\s*${n}\\s*${generics}\\s*\\(`),
@@ -3520,7 +4063,7 @@ function functionStart(lines, index, fnName, lang) {
   return null;
 }
 function params(text, name, lang) {
-  const arrow = new RegExp(`${escape(name)}\\s*[:=]\\s*(?:async\\s*)?(${IDENT})\\s*=>`).exec(text);
+  const arrow = new RegExp(`${escape2(name)}\\s*[:=]\\s*(?:async\\s*)?(${IDENT})\\s*=>`).exec(text);
   if (arrow !== null) return { params: [arrow[1]], rest: -1 };
   const open3 = text.indexOf("(", text.indexOf(name) + name.length);
   if (open3 === -1) return { params: [], rest: -1 };
@@ -3538,7 +4081,7 @@ function argumentFor(fn, args, name, lang) {
   const position = fn.params.indexOf(name);
   if (position === -1) return null;
   if (lang === "python") {
-    const keyword = args.find((a) => new RegExp(`^${escape(name)}\\s*=(?!=)`).test(a));
+    const keyword = args.find((a) => new RegExp(`^${escape2(name)}\\s*=(?!=)`).test(a));
     if (keyword !== void 0) return keyword.replace(/^[^=]*=/, "").trim();
     if (fn.rest !== -1 && fn.rest <= position) return null;
   }
@@ -3547,7 +4090,7 @@ function argumentFor(fn, args, name, lang) {
   return positional[position]?.trim() ?? null;
 }
 function assignment(lines, from, before, name, lang) {
-  const n = escape(name);
+  const n = escape2(name);
   const patterns = lang === "python" ? [
     new RegExp(`^\\s*(?:${IDENT}\\s*,\\s*)*${n}\\s*(?:,\\s*${IDENT}\\s*)*(?::[^=]+)?=(?!=)(.*)$`),
     new RegExp(`^\\s*(?:async\\s+)?for\\s+(?:.*\\b)?${n}\\b.*?\\s+in\\s+(.+?):\\s*$`),
@@ -3568,8 +4111,8 @@ function assignment(lines, from, before, name, lang) {
   }
   return null;
 }
-function callArgs(line, name) {
-  const match = new RegExp(`(?:^|[^\\w$])${escape(name)}\\s*\\(`).exec(line);
+function callArgs2(line, name) {
+  const match = new RegExp(`(?:^|[^\\w$])${escape2(name)}\\s*\\(`).exec(line);
   if (match === null) return null;
   const inner = balanced(line, match.index + match[0].length - 1);
   return inner === null ? null : splitTopLevel(inner).map((a) => a.trim());
@@ -3647,7 +4190,7 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
   const onStack = [...seeds];
   const candidates = /* @__PURE__ */ new Set([...frames.map((f) => f.file), ...seeds.map((s) => s.file)]);
   if (onStack.length === 0) return null;
-  const sameLang = (await allFiles()).filter((f) => LANG[extname(f)] === LANG[extname(frames[0]?.file ?? "")]);
+  const sameLang = (await allFiles()).filter((f) => LANG[extname2(f)] === LANG[extname2(frames[0]?.file ?? "")]);
   for (const f of sameLang.slice(0, 200)) candidates.add(f);
   for (const file of candidates) {
     const lines = await files.lines(file);
@@ -3657,7 +4200,7 @@ async function caseMismatch(frames, seeds, files, root, allFiles) {
         const value = m[2];
         const hit = onStack.find((s) => s.value !== value && s.value.toLowerCase() === value.toLowerCase() && /\w/.test(value));
         if (hit !== void 0)
-          return `**Possible case mismatch.** The lookup key ${c(`"${hit.value}"`)} at ${c(`${relative2(root, hit.file)}:${hit.index + 1}`)} and ${c(`"${value}"`)} at ${c(`${relative2(root, file)}:${i + 1}`)} differ only in case. A lookup comparing them exactly finds nothing.`;
+          return `**Possible case mismatch.** The lookup key ${c(`"${hit.value}"`)} at ${c(`${relative3(root, hit.file)}:${hit.index + 1}`)} and ${c(`"${value}"`)} at ${c(`${relative3(root, file)}:${i + 1}`)} differ only in case. A lookup comparing them exactly finds nothing.`;
       }
   }
   return null;
@@ -3768,7 +4311,7 @@ var NOT_PAYLOAD = /(?:^|[\\/])(?:package(?:-lock)?|tsconfig[\w.-]*|jsconfig|comp
 async function payloadKeys(allFiles, files, lang, skip) {
   const out = [];
   for (const file of allFiles.slice(0, MAX_SCANNED_FILES)) {
-    const ext = extname(file).toLowerCase();
+    const ext = extname2(file).toLowerCase();
     const isData = ext === ".json" || ext === ".yaml" || ext === ".yml";
     if (!isData && LANG[ext] !== lang) continue;
     if (isData && NOT_PAYLOAD.test(file)) continue;
@@ -3789,7 +4332,7 @@ function closeness(a, b) {
 async function writtenKeys(allFiles, files, lang) {
   const patterns = lang === "python" ? [/["'](\w+)["']\s*:/g, /\[\s*["'](\w+)["']\s*\]\s*=(?!=)/g, /\b(\w+)\s*=(?!=)[^,)]*[,)]/g] : [/["']?([A-Za-z_$][\w$]*)["']?\s*:(?!:)/g, /\.([A-Za-z_$][\w$]*)\s*=(?!=)/g];
   const out = [];
-  for (const file of allFiles.filter((f) => LANG[extname(f)] === lang).slice(0, MAX_SCANNED_FILES)) {
+  for (const file of allFiles.filter((f) => LANG[extname2(f)] === lang).slice(0, MAX_SCANNED_FILES)) {
     const lines = await files.lines(file);
     if (lines === null) continue;
     lines.forEach((line, index) => {
@@ -3803,7 +4346,7 @@ async function writtenKeys(allFiles, files, lang) {
 }
 async function builtWithout(key, names, frames, files, lang, allFiles) {
   const read = /* @__PURE__ */ new Set();
-  const access = (n) => lang === "python" ? new RegExp(`\\b${escape(n)}(?:\\[\\s*["'](\\w+)["']\\s*\\]|\\.get\\(\\s*["'](\\w+)["'])`, "g") : new RegExp(`\\b${escape(n)}(?:\\??\\.(${IDENT})|\\[\\s*["'](\\w+)["']\\s*\\])`, "g");
+  const access = (n) => lang === "python" ? new RegExp(`\\b${escape2(n)}(?:\\[\\s*["'](\\w+)["']\\s*\\]|\\.get\\(\\s*["'](\\w+)["'])`, "g") : new RegExp(`\\b${escape2(n)}(?:\\??\\.(${IDENT})|\\[\\s*["'](\\w+)["']\\s*\\])`, "g");
   for (const file of new Set(frames.map((f) => f.file))) {
     const text = (await files.lines(file))?.join("\n") ?? "";
     for (const n of names) for (const m of text.matchAll(access(n))) read.add(m[1] ?? m[2]);
@@ -3811,7 +4354,7 @@ async function builtWithout(key, names, frames, files, lang, allFiles) {
   read.delete(key);
   if (read.size < 2) return null;
   let best = null;
-  for (const file of allFiles.filter((f) => LANG[extname(f)] === lang).slice(0, MAX_SCANNED_FILES)) {
+  for (const file of allFiles.filter((f) => LANG[extname2(f)] === lang).slice(0, MAX_SCANNED_FILES)) {
     const text = (await files.lines(file))?.join("\n");
     if (text === void 0) continue;
     for (let pos = text.indexOf("{"); pos !== -1; pos = text.indexOf("{", pos + 1)) {
@@ -3836,9 +4379,9 @@ function similar(a, b) {
   if (x === y) return true;
   if (Math.min(x.length, y.length) < 4) return false;
   if (x.startsWith(y) || y.startsWith(x)) return true;
-  return Math.max(x.length, y.length) >= 6 && editDistance(x, y) <= 2;
+  return Math.max(x.length, y.length) >= 6 && editDistance2(x, y) <= 2;
 }
-function editDistance(a, b) {
+function editDistance2(a, b) {
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     const row = [i];
@@ -3848,7 +4391,7 @@ function editDistance(a, b) {
   }
   return prev[b.length];
 }
-function shortName(fn) {
+function shortName2(fn) {
   const name = fn.replace(/^async\s+/, "").replace(/\s*\[as \w+\]$/, "");
   return name.slice(name.lastIndexOf(".") + 1);
 }
@@ -3859,7 +4402,7 @@ function numbered(lines, start) {
 function unique(items) {
   return [...new Set(items)];
 }
-function escape(text) {
+function escape2(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 var Files = class {
@@ -3870,6 +4413,7 @@ var Files = class {
   async lines(file) {
     if (!this.cache.has(file)) {
       try {
+        if ((await stat2(file)).size > MAX_FILE_BYTES) throw new Error("too large");
         const text = await readFile2(file, "utf8");
         this.cache.set(file, text.length > MAX_FILE_BYTES ? null : text.split("\n").map((line) => line.length > MAX_LINE2 ? "" : line));
       } catch {
@@ -3891,8 +4435,8 @@ var Files = class {
     const [, mod, field] = member;
     const source = (await this.lines(file))?.join("\n") ?? "";
     const spec = new RegExp(`\\b${mod}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s+(?:\\*\\s+as\\s+)?${mod}\\s+from\\s+["']([^"']+)["']`).exec(source)?.[1] ?? mod;
-    const stem = basename4(spec).replace(/\.[cm]?[jt]s$|\.py$/, "");
-    for (const candidate of (await allFiles()).filter((f) => basename4(f, extname(f)) === stem && LANG[extname(f)] !== void 0)) {
+    const stem = basename5(spec).replace(/\.[cm]?[jt]s$|\.py$/, "");
+    for (const candidate of (await allFiles()).filter((f) => basename5(f, extname2(f)) === stem && LANG[extname2(f)] !== void 0)) {
       const lines = await this.lines(candidate);
       const at = lines?.findIndex((l) => new RegExp(`\\b${field}["']?\\s*[:=]\\s*(["'])[^"']*\\1`).test(l)) ?? -1;
       if (lines === null || at === -1) continue;
@@ -3908,27 +4452,27 @@ var Files = class {
    */
   async moduleFile(mod, near, lang, allFiles) {
     const source = (await this.lines(near))?.join("\n") ?? "";
-    const m = escape(mod);
+    const m = escape2(mod);
     const spec = lang === "js" ? new RegExp(`\\b${m}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s+(?:\\*\\s+as\\s+)?${m}\\s+from\\s+["']([^"']+)["']`).exec(source)?.[1] ?? null : new RegExp(`^\\s*from\\s+([\\w.]+)\\s+import\\s+(?:.*,\\s*)?${m}\\b`, "m").exec(source)?.[1]?.concat(`.${mod}`) ?? new RegExp(`^\\s*import\\s+([\\w.]*\\b${m})\\b`, "m").exec(source)?.[1] ?? null;
     return this.resolveSpec(spec ?? mod, near, lang, allFiles);
   }
   /** The file a function imported by name comes from: `from x import name`, `{ name } = require("./x")`, `import { name } from "./x"`. */
   async importedFrom(name, near, lang, allFiles) {
     const source = (await this.lines(near))?.join("\n") ?? "";
-    const n = escape(name);
+    const n = escape2(name);
     const spec = lang === "js" ? new RegExp(`\\{[^}]*\\b${n}\\b[^}]*\\}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s*\\{[^}]*\\b${n}\\b[^}]*\\}\\s*from\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`(?:const|let|var)\\s+${n}\\s*=\\s*require\\(\\s*["']([^"']+)["']`).exec(source)?.[1] ?? new RegExp(`import\\s+${n}\\s+from\\s*["']([^"']+)["']`).exec(source)?.[1] : new RegExp(`^\\s*from\\s+([\\w.]+)\\s+import\\s+[^\\n]*\\b${n}\\b`, "m").exec(source)?.[1];
     return spec === void 0 ? void 0 : this.resolveSpec(spec, near, lang, allFiles);
   }
   async resolveSpec(spec, near, lang, allFiles) {
-    const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang);
+    const all = (await allFiles()).filter((f) => LANG[extname2(f)] === lang);
     if (lang === "js" && spec.startsWith(".")) {
-      const base = join3(dirname2(near), spec);
+      const base = join3(dirname3(near), spec);
       const stem = base.replace(/\.[cm]?jsx?$/, "");
       return all.find((f) => f === base) ?? all.find((f) => f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ?? all.find((f) => f.replace(/\.[cm]?tsx?$/, "") === stem) ?? null;
     }
     if (lang === "js") return null;
-    const tail = `${sep}${spec.replace(/^\.+/, "").split(".").join(sep)}.py`;
-    const found = all.filter((f) => f.endsWith(tail) || basename4(f) === `${spec.split(".").pop()}.py`);
+    const tail = `${sep2}${spec.replace(/^\.+/, "").split(".").join(sep2)}.py`;
+    const found = all.filter((f) => f.endsWith(tail) || basename5(f) === `${spec.split(".").pop()}.py`);
     const exact = found.filter((f) => f.endsWith(tail));
     return (exact.length === 1 ? exact[0] : found.length === 1 ? found[0] : null) ?? null;
   }
@@ -3951,7 +4495,7 @@ var Files = class {
       if (found !== null) return found;
     }
     if (module !== null || order.length !== 1 || order[0] !== near) return null;
-    const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang).slice(0, MAX_SCANNED_FILES);
+    const all = (await allFiles()).filter((f) => LANG[extname2(f)] === lang).slice(0, MAX_SCANNED_FILES);
     const matches = [];
     for (const file of all) {
       if (file === near) continue;
@@ -3978,7 +4522,7 @@ var Files = class {
       const cls = await this.classRegion(className, producer.file, lang, allFiles);
       if (cls !== null) regions.push(cls);
     }
-    const f = escape(field);
+    const f = escape2(field);
     const source = `(${IDENT}(?:\\.${IDENT})*)`;
     const patterns = lang === "python" ? [
       new RegExp(`(?:^|[\\s(,])(?:self\\.)?${f}\\s*=(?!=)\\s*(${source}\\.get\\(\\s*["']([^"']+)["'][^)]*\\))`),
@@ -4004,10 +4548,10 @@ var Files = class {
   /** The body of `class name`, from the file `near` imports it from, `near` itself, or the one file that defines it. */
   async classRegion(name, near, lang, allFiles) {
     const imported = await this.importedFrom(name, near, lang, allFiles);
-    const head = new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?class\\s+${escape(name)}\\b`);
+    const head = new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?class\\s+${escape2(name)}\\b`);
     const candidates = imported === void 0 ? [near] : imported === null ? [] : [imported];
     if (imported === void 0) {
-      const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang && f !== near).slice(0, MAX_SCANNED_FILES);
+      const all = (await allFiles()).filter((f) => LANG[extname2(f)] === lang && f !== near).slice(0, MAX_SCANNED_FILES);
       const defining = [];
       for (const file of all) if ((await this.lines(file))?.some((l) => head.test(l))) defining.push(file);
       if (defining.length === 1) candidates.push(defining[0]);
@@ -4016,7 +4560,7 @@ var Files = class {
       const lines = await this.lines(file);
       const start = lines?.findIndex((l) => head.test(l)) ?? -1;
       if (lines === null || start === -1) continue;
-      return { file, start, lines: body(lines, start, lang, MAX_CLASS_LINES) };
+      return { file, start, lines: body(lines, start, lang, MAX_CLASS_LINES2) };
     }
     return null;
   }
@@ -4059,7 +4603,7 @@ var Files = class {
   /** The line that sets `key` in the literal starting at `at.index`, else the literal's first line. */
   async keyLine(at, key) {
     const lines = await this.lines(at.file) ?? [];
-    const pattern = new RegExp(`(?:^|[{,\\s])["']?${escape(key)}["']?\\s*:`);
+    const pattern = new RegExp(`(?:^|[{,\\s])["']?${escape2(key)}["']?\\s*:`);
     for (let i = at.index; i < Math.min(lines.length, at.index + 200); i++) if (pattern.test(lines[i])) return i;
     return at.index;
   }
@@ -4080,7 +4624,7 @@ var Files = class {
     if (lang === "python")
       for (const m of text.matchAll(new RegExp(`\\b(${IDENT})\\.(${IDENT})\\b`, "g"))) {
         const file = await this.moduleFile(m[1], def.file, lang, allFiles);
-        const found = file === null ? null : await this.literalIn(file, new RegExp(`^${escape(m[2])}\\s*(?::[^=]+)?=\\s*\\{`));
+        const found = file === null ? null : await this.literalIn(file, new RegExp(`^${escape2(m[2])}\\s*(?::[^=]+)?=\\s*\\{`));
         if (found !== null) out.push(found);
       }
     const bare = new RegExp(`^(${IDENT})$`).exec(text);
@@ -4093,7 +4637,7 @@ var Files = class {
       if (top !== null) return this.shapesOf(top.rhs, { ...def, lines: fileLines, start: 0 }, lang, allFiles, depth + 1);
       if (lang === "python") {
         const imported = await this.importedFrom(name, def.file, lang, allFiles);
-        const found = typeof imported === "string" ? await this.literalIn(imported, new RegExp(`^${escape(name)}\\s*(?::[^=]+)?=\\s*\\{`)) : null;
+        const found = typeof imported === "string" ? await this.literalIn(imported, new RegExp(`^${escape2(name)}\\s*(?::[^=]+)?=\\s*\\{`)) : null;
         if (found !== null) out.push(found);
       }
     }
@@ -4110,7 +4654,7 @@ var Files = class {
     const open3 = text.indexOf("{", head.exec(lines[index])?.index ?? 0);
     const inner = open3 === -1 ? null : balanced(text, open3);
     if (inner === null) return null;
-    return { shape: parseShape(inner, LANG[extname(file)]), file, index };
+    return { shape: parseShape(inner, LANG[extname2(file)]), file, index };
   }
   async defineIn(file, name, lang) {
     if (!file.startsWith(this.root)) return null;
@@ -4220,7 +4764,7 @@ async function attachSource(issue, root) {
     if (lines === null) continue;
     snippets.push({
       location,
-      path: relative3(realRoot, file),
+      path: relative4(realRoot, file),
       lines,
       blame: await blame(realRoot, file, location.line)
     });
@@ -4230,7 +4774,7 @@ async function attachSource(issue, root) {
   const sections = snippets.map((s) => ({
     heading: `Code: ${s.path}:${s.location.line} (${s.location.function})`,
     kind: "code",
-    language: FENCE[extname2(s.path)] ?? "",
+    language: FENCE[extname3(s.path)] ?? "",
     lines: s.lines
   }));
   const blamed = snippets.filter((s) => s.blame !== null);
@@ -4266,7 +4810,7 @@ async function attachSource(issue, root) {
       first.push({ heading: "Where the bad value came from", kind: "list", items: trace.steps });
     for (const c2 of trace.code) first.push({ heading: c2.heading, kind: "code", language: c2.language, lines: c2.lines });
   }
-  const prefixes = [`${realRoot}${sep2}`, ...isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep2}`] : []].filter((p) => p !== sep2);
+  const prefixes = [`${realRoot}${sep3}`, ...isAbsolute(root) ? [`${root.replace(/[\\/]+$/, "")}${sep3}`] : []].filter((p) => p !== sep3);
   const patterns = prefixes.map((p) => new RegExp(`(^|[\\s"'(\\[\`=])${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"));
   const shorten = (text) => patterns.reduce((t, p) => t.replace(p, "$1"), text);
   return {
@@ -4299,8 +4843,8 @@ async function resolveFile(root, location, lookup) {
     const safe = await inside(root, candidate);
     if (safe !== null) return safe;
   }
-  const sameName = await lookup(basename5(location.file));
-  const ranked = sameName.map((path) => ({ path, score: commonSuffix(path.split(sep2), segments) })).sort((a, b) => b.score - a.score);
+  const sameName = await lookup(basename6(location.file));
+  const ranked = sameName.map((path) => ({ path, score: commonSuffix(path.split(sep3), segments) })).sort((a, b) => b.score - a.score);
   if (ranked.length === 1 || ranked[0] && ranked[1] && ranked[0].score > ranked[1].score)
     return inside(root, ranked[0].path);
   return null;
@@ -4308,10 +4852,10 @@ async function resolveFile(root, location, lookup) {
 async function inside(root, candidate) {
   try {
     const real = await realpath(candidate);
-    const rel = relative3(root, real);
+    const rel = relative4(root, real);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
-    if (FENCE[extname2(real).toLowerCase()] === void 0 || rel.split(sep2).some((part) => part.startsWith("."))) return null;
-    const info = await stat2(real);
+    if (FENCE[extname3(real).toLowerCase()] === void 0 || rel.split(sep3).some((part) => part.startsWith("."))) return null;
+    const info = await stat3(real);
     return info.isFile() && info.size <= MAX_FILE_BYTES2 ? real : null;
   } catch {
     return null;
@@ -4363,7 +4907,7 @@ async function snippet(file, line) {
 var SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
 var MAX_DIFF_CELLS = 4e6;
 async function blame(root, file, line) {
-  const rel = relative3(root, file);
+  const rel = relative4(root, file);
   let current;
   try {
     current = await readFile3(file, "utf8");
@@ -4728,10 +5272,10 @@ function withSuggestion(issue, suggestion) {
 // src/server.ts
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile as readFile4, rm, stat as stat3 } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile as readFile4, rm, stat as stat4 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { basename as basename6, dirname as dirname3, isAbsolute as isAbsolute3, join as join5 } from "node:path";
+import { basename as basename7, dirname as dirname4, isAbsolute as isAbsolute3, join as join5 } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 // src/web/page.ts
@@ -5289,7 +5833,7 @@ async function serve(options) {
         throw error;
       }
       const kind = (await detectFile(path)).kind;
-      const upload = { id, name, path, size: (await stat3(path)).size, kind };
+      const upload = { id, name, path, size: (await stat4(path)).size, kind };
       if (kind === "text") {
         try {
           const result = await analyzeText2(name, await readFile4(path, "utf8"));
@@ -5329,7 +5873,7 @@ async function serve(options) {
         return { sourceRoot };
       }
       if (!isAbsolute3(path)) throw new HttpError(400, "Use an absolute folder path.");
-      const info = await stat3(path).catch(() => null);
+      const info = await stat4(path).catch(() => null);
       if (info === null || !info.isDirectory()) throw new HttpError(400, "That folder doesn't exist.");
       sourceRoot = path;
       return { sourceRoot };
@@ -5347,7 +5891,7 @@ async function serve(options) {
     },
     "POST /api/clear": async () => {
       analyzed.length = 0;
-      for (const upload of uploads.values()) await rm(dirname3(upload.path), { recursive: true, force: true });
+      for (const upload of uploads.values()) await rm(dirname4(upload.path), { recursive: true, force: true });
       uploads.clear();
       return {};
     }
@@ -5398,7 +5942,7 @@ var HttpError = class extends Error {
   }
 };
 function safeName(name) {
-  const cleaned = basename6(name.replaceAll("\\", "/")).replace(/[\u0000-\u001f]/g, "").replace(/^\.+/, "");
+  const cleaned = basename7(name.replaceAll("\\", "/")).replace(/[\u0000-\u001f]/g, "").replace(/^\.+/, "");
   return cleaned === "" ? "upload" : cleaned.slice(0, 200);
 }
 function tokenMatches(header, token) {

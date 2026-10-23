@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, sep } from "node:path";
+import { traceJava } from "./traceJava.js";
 
 /**
  * Static walk from the failing line back to where the bad value was produced,
@@ -52,7 +53,7 @@ const EXTERNAL = /\b(?:json\.loads?|JSON\.parse|yaml\.\w*load|request|req|respon
 const MAX_LINE = 2000;
 
 /** Inline code that survives backticks in the text. */
-function c(text: string): string {
+export function c(text: string): string {
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   if (longest === 0) return "`" + text + "`";
   const fence = "`".repeat(longest + 1);
@@ -88,6 +89,7 @@ export async function traceValue(
 ): Promise<TraceResult | null> {
   const crash = frames[0];
   if (crash === undefined) return null;
+  if (extname(crash.file) === ".java") return kind === "java-null-pointer" ? traceJava(message, frames, root, allFiles) : null;
   const lang = LANG[extname(crash.file)];
   if (lang === undefined) return null;
   const files = new Files(root);
@@ -626,7 +628,7 @@ function callee(expr: string): { short: string; module: string | null; awaited: 
 }
 
 /** Text inside the brackets opening at `open`, or null if unbalanced on this text. */
-function balanced(text: string, open: number): string | null {
+export function balanced(text: string, open: number): string | null {
   let depth = 0;
   let quote: string | null = null;
   for (let i = open; i < text.length; i++) {
@@ -644,7 +646,7 @@ function balanced(text: string, open: number): string | null {
   return null;
 }
 
-function splitTopLevel(text: string, angles = false): string[] {
+export function splitTopLevel(text: string, angles = false): string[] {
   const out: string[] = [];
   let depth = 0;
   let quote: string | null = null;
@@ -996,7 +998,7 @@ function shortName(fn: string): string {
   return name.slice(name.lastIndexOf(".") + 1);
 }
 
-function numbered(lines: readonly string[], start: number): string[] {
+export function numbered(lines: readonly string[], start: number): string[] {
   const width = String(start + lines.length).length;
   return lines.map((line, i) => `  ${String(start + i + 1).padStart(width)} | ${line}`);
 }
@@ -1010,13 +1012,15 @@ function escape(text: string): string {
 }
 
 /** Cached file reads, bounded in size; paths are already resolved inside the root. */
-class Files {
+export class Files {
   private readonly cache = new Map<string, readonly string[] | null>();
   constructor(private readonly root: string) {}
 
   async lines(file: string): Promise<readonly string[] | null> {
     if (!this.cache.has(file)) {
       try {
+        // Check the size first: the file is only read when it is under the cap.
+        if ((await stat(file)).size > MAX_FILE_BYTES) throw new Error("too large");
         const text = await readFile(file, "utf8");
         this.cache.set(file, text.length > MAX_FILE_BYTES ? null : text.split("\n").map((line) => (line.length > MAX_LINE ? "" : line)));
       } catch {

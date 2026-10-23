@@ -66,6 +66,7 @@ sample has `customerId` instead. With that, **5 of 5 runs fixed `models.py`**.
 | A data field read under the wrong name, 4 new held-out cases (20 runs) | 5/20 (10/40 over two batches) | **20/20** (the previous report: 9/20) |
 | A computed key (`record[prefix + "_ref"]`) the data spells differently (5 runs) | 5/10 over two batches | **5/5** (the previous report: 1/5) |
 | A nested config key dropped by a shallow merge, smaller model (3 cases, 15 runs) | 1/15 (all others guarded the crash site) | **15/15** (the previous report: 10/15) |
+| Java NullPointerException, bug in another file, smaller model (4 cases, 20 runs) | 11/20 (12/20 in a second batch) | **20/20** (the previous report: 12/20) |
 | Case-mismatched id, smaller model (3 runs) | 0/3 (all added `if (!user)`) | **3/3** |
 | Stripped binary + core dump: turns to the root cause | 4 | **1** |
 | Bug 1 file away (CSV columns shifted): turns | 7 | **3** |
@@ -153,17 +154,21 @@ small crashing project twice: once with only the error output (A), once with
 the error output plus the crashlens report (B). Each diff is scored as a
 root-cause fix or a symptom guard.
 
-- **21 cases** in Python and JavaScript: a None from a lookup, a case-mismatched
+- **27 cases** in Python, JavaScript and Java: a None from a lookup, a case-mismatched
   id, a renamed field across a queue, an environment string used as a number,
   a missing `await`, a currency code two files away, shifted CSV columns, and
   data fields read under the wrong name (camelCase vs snake_case, a nested key),
-  and a nested config key lost in a shallow merge.
-- **13 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
+  a nested config key lost in a shallow merge, and Java nulls from a map
+  lookup, a properties key, a field assigned to itself and a boxed map key.
+- **19 held-out cases** (`"heldout": true` in [bench/cases.json](bench/cases.json))
   were written before the check they test existed, with the bug one to three
   files from the crash and, in most, a misleading comment at the crash. The
   four payload cases were then used to fix one bug (a chained call split over
   lines), so they are not fully held out any more. `js-config` was used to
-  build the config-object trace and is no longer marked held out.
+  build the config-object trace and is no longer marked held out. The first
+  four Java cases were written before the Java trace, but its reports on them
+  were checked while building it; `java-handler-registry` and
+  `java-ctor-overload` were written after it and not used to tune it.
 
 ```bash
 npm run build
@@ -204,6 +209,20 @@ What we have seen so far:
   report 10/15 (0/5 on the Python case, where it stopped at `settings["cache"]`), the
   new one 15/15. The strong model already got 14/15 without crashlens; the
   new report took it to 15/15 and cut turns (5.8 → 5.0, 7.4 → 6.4, 8.0 → 6.0).
+- **Java nulls:** the JVM's NullPointerException message names what was null
+  (`because "<local2>" is null`, `because "this.rates" is null`, `because the
+  return value of "Settings.get(String)" is null`). crashlens maps a slot
+  number to the variable (checked against javac on 13 layouts), follows it to
+  where it was produced, and names the cause when it can see one. On four
+  cases with the bug in another file, the smaller model fixed the root cause
+  in 11/20 and 12/20 runs from the error alone, 12/20 with the previous report
+  and 20/20 with the new one; the properties-key case went from 0/5 to 5/5.
+  The strong model already fixed all four (20/20 with either report); the new
+  report cut its turns from 6.9 to 4.4 on average. On the two cases written
+  afterwards, which need causes the trace does not name (an enum name against
+  a wire string, a constructor overload that skips a field), it made no
+  difference: the smaller model got 6/10 with the previous report and 5/10
+  with the new one, the strong model 10/10 with both.
 - **Runtime values:** on three held-out cases where the failure output already
   printed the variables (pytest `--showlocals`, a Sentry event), the agent
   fixed the real bug 5/5 without crashlens too: with the values on screen, it
@@ -278,7 +297,11 @@ and machines.
   from the stored one (followed back to the literal, even in a config file), a
   field the producer spells differently from the consumer, columns zipped
   against a shifted slice, an environment value used as a number, or a
-  config object whose shallow merge drops a nested key. These
+  config object whose shallow merge drops a nested key. For Java it starts
+  from the NullPointerException message and checks for a map key normalized
+  on write but not on read, an `int` looked up in a `Map<Long, ...>`, a
+  properties key the file spells differently, a field assigned to itself or
+  never assigned, and a method that returns `null`. These
   come first in the report, labeled as hypotheses from a static reading.
   When the code reads a field of incoming data under a name the project's data
   samples (JSON fixtures, OpenAPI schemas) spell differently, it names both.
@@ -515,11 +538,11 @@ Exit codes: `0` report produced, `1` triage failed, `2` invalid arguments.
 - [ ] Windows minidumps and macOS crash reports
 - [x] Verify the binary matches the core by build ID
 - [x] Stripped binaries: names from unwind tables, function disassembly, REA + Ghidra pseudocode
-- [x] Trace the bad value to where it was produced, with named hypotheses (Python, JavaScript)
+- [x] Trace the bad value to where it was produced, with named hypotheses (Python, JavaScript, Java NullPointerExceptions)
 - [x] A/B benchmark for coding agents (`bench/`)
 - [x] Follow a field to where it is set and check its key against the project's data samples
 - [x] Follow values through config objects (shallow-merge hypothesis)
-- [ ] Value tracing for Java, Go and Rust
+- [ ] Value tracing for Go and Rust, and Java exceptions other than NullPointerException
 - [ ] Error-tracker integrations (Sentry, OpenTelemetry)
 - [ ] Opt-in reproduction: rerun your own build to confirm a crash and verify a
       fix (design only; today crashlens is strictly read-only)
