@@ -43,12 +43,17 @@ type Candidate =
 
 /** Triage every core dump and panic log under a directory and group duplicates. */
 export async function triageBatch(options: BatchOptions): Promise<BatchResult> {
-  const files = await listFiles(options.directory);
+  const unreadable: Candidate[] = [];
+  const files = await listFiles(options.directory, unreadable);
   if (files.length > MAX_BATCH_FILES)
     throw new Error(`${options.directory} has more than ${MAX_BATCH_FILES} files; point --batch at a smaller folder.`);
-  const candidates: Candidate[] = [];
+  const candidates: Candidate[] = [...unreadable];
   await forEachLimit(files, 16, async (file) => {
-    candidates.push(await detect(file));
+    try {
+      candidates.push(await detect(file));
+    } catch (error) {
+      candidates.push({ kind: "skip", path: file, reason: `could not read: ${errorMessage(error)}` });
+    }
   });
   candidates.sort((a, b) => a.path.localeCompare(b.path));
   const issues: { file: string; issue: Issue }[] = [];
@@ -67,7 +72,13 @@ export async function triageBatch(options: BatchOptions): Promise<BatchResult> {
         });
       else cores.push(candidate.path);
     } else {
-      const text = await readFile(candidate.path, "utf8");
+      let text: string;
+      try {
+        text = await readFile(candidate.path, "utf8");
+      } catch (error) {
+        skipped.push({ file: name(candidate.path), reason: `could not read: ${errorMessage(error)}` });
+        continue;
+      }
       const parsed = parseFailure(text);
       if (parsed.ok)
         issues.push({
@@ -173,14 +184,22 @@ export function renderBatchMarkdown(result: BatchResult): string {
   return lines.join("\n");
 }
 
-async function listFiles(directory: string, depth = 0): Promise<string[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
+/** Files under `directory`; folders below it that cannot be listed go to `unreadable`, not fatal. */
+async function listFiles(directory: string, unreadable: Candidate[], depth = 0): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (depth === 0) throw new Error(`Could not read ${directory}: ${errorMessage(error)}`);
+    unreadable.push({ kind: "skip", path: directory, reason: `could not read folder: ${errorMessage(error)}` });
+    return [];
+  }
   const files: string[] = [];
   for (const entry of entries) {
     if (entry.name.startsWith(".")) continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (depth < MAX_DEPTH) files.push(...(await listFiles(path, depth + 1)));
+      if (depth < MAX_DEPTH) files.push(...(await listFiles(path, unreadable, depth + 1)));
     } else if (entry.isFile()) files.push(path);
   }
   return files;
@@ -219,4 +238,11 @@ const MAX_BATCH_FILES = 10_000;
 
 function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+/** `EACCES: permission denied, open '…'` → `permission denied (EACCES)`, without the path. */
+function errorMessage(error: unknown): string {
+  const e = error as NodeJS.ErrnoException;
+  if (typeof e?.code === "string") return `${e.message.replace(/^[A-Z]+: /, "").replace(/, \w+ '.*'$/, "")} (${e.code})`;
+  return e instanceof Error ? e.message : String(error);
 }

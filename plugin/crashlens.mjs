@@ -753,7 +753,10 @@ function simpleName(type) {
 }
 
 // src/parsers/node.ts
-var HEADER2 = /^([A-Z][\w$]*)(?: \[([\w$]+)\])?: (.*)\n\s+at /m;
+var HEADER_LINE = /^([A-Z][\w$]*)(?: \[([\w$]+)\])?: (.*)$/;
+var ERROR_TYPE = /(?:Error|Exception|Failure)$/;
+var MAX_MESSAGE_LINES = 60;
+var CAUSE = /^\s*\[cause\]: ([A-Z][\w$]*)(?: \[([\w$]+)\])?: (.*)$/;
 var FRAME_START = /^\s+at (?:async )?/;
 function frameParts(line) {
   const start = FRAME_START.exec(line);
@@ -766,16 +769,55 @@ function frameParts(line) {
 var PLACE = /^(.*):(\d+):(\d+)$/;
 var SOURCE_PREAMBLE = /^(\S.*):(\d+)\n(.*)\n *\^+ *\n\n$/;
 function parseNode(text) {
-  const header = HEADER2.exec(text);
-  if (header === null) return null;
-  let start = lineStart(text, header.index);
+  const lines = text.split("\n");
+  const found = findError(lines);
+  if (found === null) return null;
+  const offsets = [];
+  lines.reduce((offset, line) => (offsets.push(offset), offset + line.length + 1), 0);
+  let start = offsets[found.header];
   const above = text.slice(0, start);
-  const lines = above.split("\n");
-  const preambleText = lines.slice(-5).join("\n");
+  const preambleText = above.split("\n").slice(-5).join("\n");
   const preamble = SOURCE_PREAMBLE.exec(preambleText);
   if (preamble !== null) start = above.length - preambleText.length;
+  const frames = framesFrom(lines, found.frames);
+  if (preamble !== null) {
+    const index = frames.findIndex((f) => f.file === preamble[1] && f.line === Number(preamble[2]));
+    const target = frames[index];
+    if (target !== void 0) frames[index] = { ...target, code: (preamble[3] ?? "").trim() };
+  }
+  const head = HEADER_LINE.exec(lines[found.header]);
+  const type = head[2] === void 0 ? head[1] : `${head[1]} [${head[2]}]`;
+  const message = [head[3] ?? "", ...lines.slice(found.header + 1, found.frames)].join("\n").trim();
+  for (let i = lines.length - 1; i > found.frames; i--) {
+    const cause = CAUSE.exec(lines[i]);
+    if (cause === null) continue;
+    const causeFrames = framesFrom(lines, i + 1);
+    if (causeFrames.length === 0) continue;
+    return failure({
+      language: "node",
+      header: "exception",
+      errorType: cause[2] === void 0 ? cause[1] : `${cause[1]} [${cause[2]}]`,
+      message: (cause[3] ?? "").trim(),
+      frames: causeFrames,
+      wrappedBy: [`${type}: ${message.split("\n")[0]}`],
+      start
+    });
+  }
+  return failure({ language: "node", header: "exception", errorType: type, message, frames, start });
+}
+function findError(lines) {
+  for (let i = 1; i < lines.length; i++) {
+    if (frameParts(lines[i]) === null || frameParts(lines[i - 1]) !== null) continue;
+    for (let j = i - 1; j >= Math.max(0, i - MAX_MESSAGE_LINES); j--) {
+      const head = HEADER_LINE.exec(lines[j]);
+      if (head !== null && (ERROR_TYPE.test(head[1]) || j === i - 1)) return { header: j, frames: i };
+    }
+  }
+  return null;
+}
+function framesFrom(lines, from) {
   const frames = [];
-  for (const line of text.slice(header.index).split("\n").slice(1)) {
+  for (const line of lines.slice(from)) {
     const match = frameParts(line);
     if (match === null) break;
     const name = match[1] ?? null;
@@ -791,21 +833,7 @@ function parseNode(text) {
       })
     );
   }
-  if (preamble !== null) {
-    const index = frames.findIndex(
-      (f) => f.file === preamble[1] && f.line === Number(preamble[2])
-    );
-    const target = frames[index];
-    if (target !== void 0) frames[index] = { ...target, code: (preamble[3] ?? "").trim() };
-  }
-  return failure({
-    language: "node",
-    header: "exception",
-    errorType: header[2] === void 0 ? header[1] ?? "Error" : `${header[1]} [${header[2]}]`,
-    message: header[3] ?? "",
-    frames,
-    start
-  });
+  return frames;
 }
 function isOwnNodeFile(file) {
   return !file.startsWith("node:") && !file.includes("/node_modules/") && !file.startsWith("internal/");
@@ -2351,16 +2379,32 @@ function parseGdbOutput(stdout, stderr) {
     )
   };
 }
-var FRAME4 = /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(\S+) \(.*?\)(?: (?:at|from) (.+))?$/i;
+var FRAME_HEAD = /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(.*)$/i;
+var FRAME_PLACE = /^(.*\))\s+(?:at|from)\s+(\S+)$/;
 function parseFrame(line) {
-  const match = FRAME4.exec(line.trim());
-  if (match === null) return [];
+  const head = FRAME_HEAD.exec(line.trim());
+  if (head === null) return [];
+  const rest = (head[3] ?? "").trim();
+  const placed = FRAME_PLACE.exec(rest);
+  const call = placed?.[1] ?? rest;
+  if (!call.endsWith(")")) return [];
+  let depth = 0;
+  let open3 = -1;
+  for (let i = call.length - 1; i >= 0; i--) {
+    if (call[i] === ")") depth++;
+    else if (call[i] === "(" && --depth === 0) {
+      open3 = i;
+      break;
+    }
+  }
+  const name = open3 <= 0 ? "" : call.slice(0, open3).trim();
+  if (name === "") return [];
   return [
     {
-      index: Number(match[1]),
-      address: match[2] === void 0 ? null : BigInt(match[2]),
-      function: match[3] ?? "??",
-      source: match[4] ?? null
+      index: Number(head[1]),
+      address: head[2] === void 0 ? null : BigInt(head[2]),
+      function: name,
+      source: placed?.[2] ?? null
     }
   ];
 }
@@ -2915,12 +2959,17 @@ import { readdir, readFile } from "node:fs/promises";
 import { join as join2, relative } from "node:path";
 var MAX_DEPTH = 4;
 async function triageBatch(options) {
-  const files = await listFiles(options.directory);
+  const unreadable = [];
+  const files = await listFiles(options.directory, unreadable);
   if (files.length > MAX_BATCH_FILES)
     throw new Error(`${options.directory} has more than ${MAX_BATCH_FILES} files; point --batch at a smaller folder.`);
-  const candidates = [];
+  const candidates = [...unreadable];
   await forEachLimit(files, 16, async (file) => {
-    candidates.push(await detect(file));
+    try {
+      candidates.push(await detect(file));
+    } catch (error) {
+      candidates.push({ kind: "skip", path: file, reason: `could not read: ${errorMessage(error)}` });
+    }
   });
   candidates.sort((a, b) => a.path.localeCompare(b.path));
   const issues = [];
@@ -2938,7 +2987,13 @@ async function triageBatch(options) {
         });
       else cores.push(candidate.path);
     } else {
-      const text = await readFile(candidate.path, "utf8");
+      let text;
+      try {
+        text = await readFile(candidate.path, "utf8");
+      } catch (error) {
+        skipped.push({ file: name(candidate.path), reason: `could not read: ${errorMessage(error)}` });
+        continue;
+      }
       const parsed = parseFailure(text);
       if (parsed.ok)
         issues.push({
@@ -3032,14 +3087,21 @@ function renderBatchMarkdown(result) {
   lines.push("_Generated by crashlens; no program was executed._", "");
   return lines.join("\n");
 }
-async function listFiles(directory, depth = 0) {
-  const entries = await readdir(directory, { withFileTypes: true });
+async function listFiles(directory, unreadable, depth = 0) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (depth === 0) throw new Error(`Could not read ${directory}: ${errorMessage(error)}`);
+    unreadable.push({ kind: "skip", path: directory, reason: `could not read folder: ${errorMessage(error)}` });
+    return [];
+  }
   const files = [];
   for (const entry of entries) {
     if (entry.name.startsWith(".")) continue;
     const path = join2(directory, entry.name);
     if (entry.isDirectory()) {
-      if (depth < MAX_DEPTH) files.push(...await listFiles(path, depth + 1));
+      if (depth < MAX_DEPTH) files.push(...await listFiles(path, unreadable, depth + 1));
     } else if (entry.isFile()) files.push(path);
   }
   return files;
@@ -3070,6 +3132,11 @@ async function forEachLimit(items, limit, run) {
 var MAX_BATCH_FILES = 1e4;
 function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c2) => `&#${c2.charCodeAt(0)};`);
+}
+function errorMessage(error) {
+  const e = error;
+  if (typeof e?.code === "string") return `${e.message.replace(/^[A-Z]+: /, "").replace(/, \w+ '.*'$/, "")} (${e.code})`;
+  return e instanceof Error ? e.message : String(error);
 }
 
 // src/mcp.ts
@@ -3761,7 +3828,8 @@ var Files = class {
     const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang);
     if (lang === "js" && spec.startsWith(".")) {
       const base = join3(dirname2(near), spec);
-      return all.find((f) => f === base || f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ?? null;
+      const stem = base.replace(/\.[cm]?jsx?$/, "");
+      return all.find((f) => f === base) ?? all.find((f) => f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ?? all.find((f) => f.replace(/\.[cm]?tsx?$/, "") === stem) ?? null;
     }
     if (lang === "js") return null;
     const tail = `${sep}${spec.replace(/^\.+/, "").split(".").join(sep)}.py`;
@@ -4105,55 +4173,74 @@ async function snippet(file, line) {
     out.push(`${n === line ? ">" : " "} ${String(n).padStart(width)} | ${lines[n - 1] ?? ""}`);
   return out;
 }
-function blame(root, file, line) {
+var SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+var MAX_DIFF_CELLS = 4e6;
+async function blame(root, file, line) {
+  const rel = relative3(root, file);
+  let current;
+  try {
+    current = await readFile3(file, "utf8");
+  } catch {
+    return null;
+  }
+  const committed = await git(root, ["cat-file", "blob", `HEAD:${rel}`]);
+  if (committed === null) return await git(root, ["rev-parse", "--verify", "HEAD"]) === null ? null : UNCOMMITTED;
+  const mapped = mapLine(committed.split("\n"), current.split("\n"), line);
+  if (mapped === void 0) return null;
+  if (mapped === null) return UNCOMMITTED;
+  const stdout = await git(root, ["blame", "--porcelain", "--no-textconv", "-L", `${mapped},${mapped}`, "HEAD", "--", rel]);
+  const sha = stdout === null ? void 0 : /^([0-9a-f]{40}) /.exec(stdout)?.[1];
+  if (stdout === null || sha === void 0) return null;
+  const field = (name) => new RegExp(`^${name} (.*)$`, "m").exec(stdout)?.[1] ?? "";
+  const time = Number(field("author-time"));
+  return {
+    commit: sha.slice(0, 8),
+    author: field("author"),
+    date: Number.isFinite(time) && time > 0 ? new Date(time * 1e3).toISOString().slice(0, 10) : "",
+    summary: field("summary")
+  };
+}
+var UNCOMMITTED = { commit: "uncommitted", author: "", date: "", summary: "" };
+function git(root, args) {
   return new Promise((resolve3) => {
     execFile4(
       "git",
-      [
-        // The repo may be untrusted: its config must not make git run anything.
-        // Blaming HEAD (not the work tree) avoids fsmonitor and clean filters;
-        // --no-textconv avoids diff drivers; hooks are disabled for good measure.
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-C",
-        root,
-        "blame",
-        "--porcelain",
-        "--no-textconv",
-        "-L",
-        `${line},${line}`,
-        "HEAD",
-        "--",
-        relative3(root, file)
-      ],
-      { timeout: GIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
-      (error, stdout) => {
-        if (error) {
-          resolve3(null);
-          return;
-        }
-        const sha = /^([0-9a-f]{40}) /.exec(stdout)?.[1];
-        if (sha === void 0) {
-          resolve3(null);
-          return;
-        }
-        if (/^0+$/.test(sha)) {
-          resolve3({ commit: "uncommitted", author: "", date: "", summary: "" });
-          return;
-        }
-        const field = (name) => new RegExp(`^${name} (.*)$`, "m").exec(stdout)?.[1] ?? "";
-        const time = Number(field("author-time"));
-        resolve3({
-          commit: sha.slice(0, 8),
-          author: field("author"),
-          date: Number.isFinite(time) && time > 0 ? new Date(time * 1e3).toISOString().slice(0, 10) : "",
-          summary: field("summary")
-        });
-      }
+      [...SAFE_GIT, "-C", root, ...args],
+      { timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * MAX_FILE_BYTES2 },
+      (error, stdout) => resolve3(error ? null : stdout)
     );
   });
+}
+function mapLine(committed, current, line) {
+  let prefix = 0;
+  while (prefix < committed.length && prefix < current.length && committed[prefix] === current[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < committed.length - prefix && suffix < current.length - prefix && committed[committed.length - 1 - suffix] === current[current.length - 1 - suffix])
+    suffix++;
+  if (line <= prefix) return line;
+  if (line > current.length - suffix) return committed.length - (current.length - line);
+  const a = committed.slice(prefix, committed.length - suffix);
+  const b = current.slice(prefix, current.length - suffix);
+  if (a.length * b.length > MAX_DIFF_CELLS) return void 0;
+  const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let i2 = a.length - 1; i2 >= 0; i2--)
+    for (let j2 = b.length - 1; j2 >= 0; j2--)
+      lcs[i2][j2] = a[i2] === b[j2] ? lcs[i2 + 1][j2 + 1] + 1 : Math.max(lcs[i2 + 1][j2], lcs[i2][j2 + 1]);
+  const target = line - 1 - prefix;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      if (j === target) return prefix + i + 1;
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) i++;
+    else {
+      if (j === target) return null;
+      j++;
+    }
+  }
+  return null;
 }
 
 // src/mcp.ts
@@ -5273,15 +5360,19 @@ Press Ctrl+C to stop; uploaded files are deleted on exit.
   let output;
   if (values.batch !== void 0) {
     if (positionals.length > 1) return usage("--batch takes a directory and at most one binary.");
-    const result = await triageBatch({
-      directory: absolute(values.batch),
-      binaryPath: positionals[0] === void 0 ? null : absolute(positionals[0]),
-      rea: resolveReaCommand(),
-      gdb,
-      enrich
-    });
-    output = { ok: true, text: values.json ? `${toJson(result)}
+    try {
+      const result = await triageBatch({
+        directory: absolute(values.batch),
+        binaryPath: positionals[0] === void 0 ? null : absolute(positionals[0]),
+        rea: resolveReaCommand(),
+        gdb,
+        enrich
+      });
+      output = { ok: true, text: values.json ? `${toJson(result)}
 ` : renderBatchMarkdown(result) };
+    } catch (error) {
+      output = { ok: false, message: error.message };
+    }
   } else if (positionals.length === 2) {
     const [core, binary] = positionals;
     const parsed2 = await analyzeCore({

@@ -253,44 +253,94 @@ async function snippet(file: string, line: number): Promise<string[] | null> {
   return out;
 }
 
-/** `git blame` for one line; null outside a repository or on any git error. */
-function blame(root: string, file: string, line: number): Promise<Blame | null> {
+/** Flags for every git call on a repository that may be untrusted: its config must not make git run anything. */
+const SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+/** Above this many line pairs in the changed middle of a file, the line is not mapped (no blame). */
+const MAX_DIFF_CELLS = 4_000_000;
+
+/**
+ * `git blame` for one line of the file as it is now; null outside a repository
+ * or on any git error. Git never sees the working copy: the committed text is
+ * read with `cat-file` (no filters), the line is mapped onto it by a line diff
+ * here, and HEAD is blamed with `--no-textconv`. Passing the working text to
+ * git instead (`--contents`) would run the repo's clean filters. A line that
+ * exists only locally is reported as not committed.
+ */
+async function blame(root: string, file: string, line: number): Promise<Blame | null> {
+  const rel = relative(root, file);
+  let current: string;
+  try {
+    current = await readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+  const committed = await git(root, ["cat-file", "blob", `HEAD:${rel}`]);
+  if (committed === null) return (await git(root, ["rev-parse", "--verify", "HEAD"])) === null ? null : UNCOMMITTED;
+  const mapped = mapLine(committed.split("\n"), current.split("\n"), line);
+  if (mapped === undefined) return null;
+  if (mapped === null) return UNCOMMITTED;
+  const stdout = await git(root, ["blame", "--porcelain", "--no-textconv", "-L", `${mapped},${mapped}`, "HEAD", "--", rel]);
+  const sha = stdout === null ? undefined : /^([0-9a-f]{40}) /.exec(stdout)?.[1];
+  if (stdout === null || sha === undefined) return null;
+  const field = (name: string) => new RegExp(`^${name} (.*)$`, "m").exec(stdout)?.[1] ?? "";
+  const time = Number(field("author-time"));
+  return {
+    commit: sha.slice(0, 8),
+    author: field("author"),
+    date: Number.isFinite(time) && time > 0 ? new Date(time * 1000).toISOString().slice(0, 10) : "",
+    summary: field("summary"),
+  };
+}
+
+const UNCOMMITTED: Blame = { commit: "uncommitted", author: "", date: "", summary: "" };
+
+function git(root: string, args: readonly string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile(
-      "git",
-      [
-        // The repo may be untrusted: its config must not make git run anything.
-        // Blaming HEAD (not the work tree) avoids fsmonitor and clean filters;
-        // --no-textconv avoids diff drivers; hooks are disabled for good measure.
-        "-c", "core.fsmonitor=false",
-        "-c", "core.hooksPath=/dev/null",
-        "-C", root,
-        "blame", "--porcelain", "--no-textconv", "-L", `${line},${line}`, "HEAD", "--", relative(root, file),
-      ],
-      { timeout: GIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
-      (error, stdout) => {
-        if (error) {
-          resolve(null);
-          return;
-        }
-        const sha = /^([0-9a-f]{40}) /.exec(stdout)?.[1];
-        if (sha === undefined) {
-          resolve(null);
-          return;
-        }
-        if (/^0+$/.test(sha)) {
-          resolve({ commit: "uncommitted", author: "", date: "", summary: "" });
-          return;
-        }
-        const field = (name: string) => new RegExp(`^${name} (.*)$`, "m").exec(stdout)?.[1] ?? "";
-        const time = Number(field("author-time"));
-        resolve({
-          commit: sha.slice(0, 8),
-          author: field("author"),
-          date: Number.isFinite(time) && time > 0 ? new Date(time * 1000).toISOString().slice(0, 10) : "",
-          summary: field("summary"),
-        });
-      },
+    execFile("git", [...SAFE_GIT, "-C", root, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * MAX_FILE_BYTES }, (error, stdout) =>
+      resolve(error ? null : stdout),
     );
   });
+}
+
+/**
+ * The committed line number (1-based) of line `line` of the working copy;
+ * null when that line was added or changed locally; undefined when the change
+ * is too large to map. Common leading and trailing lines map directly; the
+ * changed middle is matched by longest common subsequence.
+ */
+export function mapLine(committed: readonly string[], current: readonly string[], line: number): number | null | undefined {
+  let prefix = 0;
+  while (prefix < committed.length && prefix < current.length && committed[prefix] === current[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < committed.length - prefix &&
+    suffix < current.length - prefix &&
+    committed[committed.length - 1 - suffix] === current[current.length - 1 - suffix]
+  )
+    suffix++;
+  if (line <= prefix) return line;
+  if (line > current.length - suffix) return committed.length - (current.length - line);
+  const a = committed.slice(prefix, committed.length - suffix);
+  const b = current.slice(prefix, current.length - suffix);
+  if (a.length * b.length > MAX_DIFF_CELLS) return undefined;
+  // lcs[i][j]: length of the LCS of a[i..] and b[j..].
+  const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--)
+    for (let j = b.length - 1; j >= 0; j--)
+      (lcs[i] as Uint32Array)[j] = a[i] === b[j] ? ((lcs[i + 1] as Uint32Array)[j + 1] as number) + 1 : Math.max((lcs[i + 1] as Uint32Array)[j] as number, (lcs[i] as Uint32Array)[j + 1] as number);
+  const target = line - 1 - prefix;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      if (j === target) return prefix + i + 1;
+      i++;
+      j++;
+    } else if (((lcs[i + 1] as Uint32Array)[j] as number) >= ((lcs[i] as Uint32Array)[j + 1] as number)) i++;
+    else {
+      if (j === target) return null;
+      j++;
+    }
+  }
+  return null;
 }

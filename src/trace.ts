@@ -975,7 +975,14 @@ class Files {
     const all = (await allFiles()).filter((f) => LANG[extname(f)] === lang);
     if (lang === "js" && spec.startsWith(".")) {
       const base = join(dirname(near), spec);
-      return all.find((f) => f === base || f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ?? null;
+      // TypeScript ESM imports name the emitted file: "./db.js" is db.ts, "./x.mjs" is x.mts.
+      const stem = base.replace(/\.[cm]?jsx?$/, "");
+      return (
+        all.find((f) => f === base) ??
+        all.find((f) => f.replace(/\.[cm]?[jt]sx?$/, "") === base || f.replace(/\/index\.[cm]?[jt]sx?$/, "") === base) ??
+        all.find((f) => f.replace(/\.[cm]?tsx?$/, "") === stem) ??
+        null
+      );
     }
     if (lang === "js") return null; // a package from node_modules
     const tail = `${sep}${spec.replace(/^\.+/, "").split(".").join(sep)}.py`;

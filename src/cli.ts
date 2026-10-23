@@ -116,14 +116,18 @@ async function main(argv: readonly string[]): Promise<number> {
   let output: Output;
   if (values.batch !== undefined) {
     if (positionals.length > 1) return usage("--batch takes a directory and at most one binary.");
-    const result = await triageBatch({
-      directory: absolute(values.batch),
-      binaryPath: positionals[0] === undefined ? null : absolute(positionals[0]),
-      rea: resolveReaCommand(),
-      gdb,
-      enrich,
-    });
-    output = { ok: true, text: values.json ? `${toJson(result)}\n` : renderBatchMarkdown(result) };
+    try {
+      const result = await triageBatch({
+        directory: absolute(values.batch),
+        binaryPath: positionals[0] === undefined ? null : absolute(positionals[0]),
+        rea: resolveReaCommand(),
+        gdb,
+        enrich,
+      });
+      output = { ok: true, text: values.json ? `${toJson(result)}\n` : renderBatchMarkdown(result) };
+    } catch (error) {
+      output = { ok: false, message: (error as Error).message };
+    }
   } else if (positionals.length === 2) {
     const [core, binary] = positionals as [string, string];
     const parsed = await analyzeCore({

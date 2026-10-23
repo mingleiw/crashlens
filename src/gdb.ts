@@ -119,18 +119,39 @@ export function parseGdbOutput(stdout: string, stderr: string): GdbReport {
   };
 }
 
-const FRAME =
-  /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(\S+) \(.*?\)(?: (?:at|from) (.+))?$/i;
+const FRAME_HEAD = /^#(\d+)\s+(?:(0x[0-9a-f]+) in )?(.*)$/i;
+const FRAME_PLACE = /^(.*\))\s+(?:at|from)\s+(\S+)$/;
 
+/**
+ * `#1  0x… in std::vector<int, std::allocator<int> >::at (this=…, __n=5) at f.h:10`.
+ * C++ names can hold spaces and parentheses (templates, `(anonymous namespace)`,
+ * `operator new`), so the name is everything before the argument list: the
+ * parenthesised group that closes the line (before ` at …` or ` from …`).
+ */
 function parseFrame(line: string): GdbFrame[] {
-  const match = FRAME.exec(line.trim());
-  if (match === null) return [];
+  const head = FRAME_HEAD.exec(line.trim());
+  if (head === null) return [];
+  const rest = (head[3] ?? "").trim();
+  const placed = FRAME_PLACE.exec(rest);
+  const call = placed?.[1] ?? rest;
+  if (!call.endsWith(")")) return [];
+  let depth = 0;
+  let open = -1;
+  for (let i = call.length - 1; i >= 0; i--) {
+    if (call[i] === ")") depth++;
+    else if (call[i] === "(" && --depth === 0) {
+      open = i;
+      break;
+    }
+  }
+  const name = open <= 0 ? "" : call.slice(0, open).trim();
+  if (name === "") return [];
   return [
     {
-      index: Number(match[1]),
-      address: match[2] === undefined ? null : BigInt(match[2]),
-      function: match[3] ?? "??",
-      source: match[4] ?? null,
+      index: Number(head[1]),
+      address: head[2] === undefined ? null : BigInt(head[2]),
+      function: name,
+      source: placed?.[2] ?? null,
     },
   ];
 }

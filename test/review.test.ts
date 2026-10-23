@@ -1,10 +1,11 @@
 // Regressions for the security and correctness review findings.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { analyzeFile } from "../src/analyze.js";
 import { parseFailure } from "../src/failure.js";
 import { logContext, toFailureIssue } from "../src/failureIssue.js";
@@ -52,6 +53,8 @@ describe("security", () => {
     writeFileSync(join(root, ".gitattributes"), "*.py diff=evil\n");
     git("config", "core.fsmonitor", `touch ${marker}; false`);
     git("config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat "$0"'`);
+    git("config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`);
+    writeFileSync(join(root, ".gitattributes"), "*.py diff=evil filter=evil\n");
     const md = await report(root, py(root, [["app.py", 3, "<module>", "f(None)"], ["app.py", 2, "f", "return x.name"]], "AttributeError: 'NoneType' object has no attribute 'name'"));
     assert.equal(existsSync(marker), false, "no repo-configured command ran");
     assert.match(md, /Last change to these lines/, "blame still works");
@@ -334,5 +337,133 @@ describe("runtime values", () => {
     const parsed = parse(text);
     assert.equal(parsed.errorType, "AssertionError");
     assert.equal(parsed.message, "assert 3 == 4");
+  });
+});
+
+describe("second review", () => {
+  it("keeps C++ gdb frames whose names hold spaces, templates or parentheses", async () => {
+    const { parseGdbOutput } = await import("../src/gdb.js");
+    const report = parseGdbOutput(
+      [
+        "@@crashlens@@bt",
+        "#0  0x00007f3a in __memmove_avx_unaligned_erms () from /lib/x86_64-linux-gnu/libc.so.6",
+        "#1  0x0000555 in std::vector<int, std::allocator<int> >::at (this=0x7ffd, __n=5) at /usr/include/c++/11/bits/stl_vector.h:1063",
+        "#2  0x0000556 in (anonymous namespace)::Parser::parse (this=0x1) at parser.cc:42",
+        "#3  0x0000557 in operator new (sz=16) at new_op.cc:50",
+        "#4  0x0000558 in main () at main.cc:7",
+      ].join("\n"),
+      "",
+    );
+    assert.ok(report.status === "ok");
+    assert.deepEqual(report.frames.map((f) => [f.function, f.source]), [
+      ["__memmove_avx_unaligned_erms", "/lib/x86_64-linux-gnu/libc.so.6"],
+      ["std::vector<int, std::allocator<int> >::at", "/usr/include/c++/11/bits/stl_vector.h:1063"],
+      ["(anonymous namespace)::Parser::parse", "parser.cc:42"],
+      ["operator new", "new_op.cc:50"],
+      ["main", "main.cc:7"],
+    ]);
+  });
+
+  it("blames the line as it is in the working copy, not the same line number in HEAD", async () => {
+    const root = project("blame-shift", { "app.py": ["def total(o):", '    return o["x"]', "", "", "def other():", "    return 1"] });
+    const git = (author: string, ...a: string[]) => execFileSync("git", ["-c", `user.name=${author}`, "-c", "user.email=a@example.invalid", ...a], { cwd: root });
+    git("Old", "init", "-q");
+    git("Old", "add", "-A");
+    git("Old", "commit", "-qm", "Old writes everything");
+    writeFileSync(join(root, "app.py"), ["def total(o):", '    return o["items"]', "", "", "def other():", "    return 1"].join("\n"));
+    git("Dana", "commit", "-qam", "Dana changes line 2");
+    // A local edit above the crash shifts it from line 2 (in HEAD) to line 3.
+    writeFileSync(join(root, "app.py"), ["# local note", "def total(o):", '    return o["items"]', "", "", "def other():", "    return 1"].join("\n"));
+    const out = ["Traceback (most recent call last):", `  File "${root}/app.py", line 3, in total`, '    return o["items"]', "KeyError: 'items'"].join("\n");
+    const md = renderIssueMarkdown(await attachSource(toFailureIssue(parse(out), "e", out), root));
+    assert.match(md, /`app\.py:3`: Dana, .*"Dana changes line 2"/);
+    // A line changed only locally is reported as not committed.
+    writeFileSync(join(root, "app.py"), ["def total(o):", '    return o["changed"]', "", "", "def other():", "    return 1"].join("\n"));
+    const local = out.replace("line 3", "line 2").replaceAll('o["items"]', 'o["changed"]');
+    const localMd = renderIssueMarkdown(await attachSource(toFailureIssue(parse(local), "e", local), root));
+    assert.match(localMd, /not committed yet/);
+  });
+
+  it("skips an unreadable file in --batch instead of crashing the run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "crashlens-unreadable-"));
+    chmodSync(dir, 0o755);
+    writeFileSync(join(dir, "good.log"), "Traceback (most recent call last):\n  File \"a.py\", line 1, in <module>\n    x\nValueError: bad\n", { mode: 0o644 });
+    writeFileSync(join(dir, "locked.log"), "secret", { mode: 0o000 });
+    chmodSync(join(dir, "locked.log"), 0o000);
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
+    // Root can read anything, so run as an unprivileged user when the tests run as root.
+    const asUser = process.getuid?.() === 0 ? { uid: 65534, gid: 65534 } : {};
+    const run = spawnSync(process.execPath, [cli, "--batch", dir, "--json"], { encoding: "utf8", ...asUser });
+    rmSync(dir, { recursive: true, force: true });
+    assert.equal(run.status, 0, run.stderr);
+    const result = JSON.parse(run.stdout) as { failures: number; skipped: { file: string; reason: string }[] };
+    assert.equal(result.failures, 1);
+    assert.deepEqual(result.skipped.map((s) => s.file), ["locked.log"]);
+    assert.match(result.skipped[0]?.reason ?? "", /could not read: .*EACCES/);
+  });
+
+  it("recognizes Node errors whose message spans several lines, like an assertion diff", () => {
+    const text = [
+      "node:assert:150",
+      "  throw new AssertionError(obj);",
+      "  ^",
+      "",
+      "AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:",
+      "+ actual - expected",
+      "",
+      "  {",
+      "    id: 1,",
+      "+   name: 'Ada L'",
+      "-   name: 'Ada'",
+      "  }",
+      "",
+      "    at check (/srv/app/check.js:2:28)",
+      "    at Object.<anonymous> (/srv/app/check.js:3:1)",
+    ].join("\n");
+    const parsed = parse(text);
+    assert.equal(parsed.errorType, "AssertionError [ERR_ASSERTION]");
+    assert.match(parsed.message, /^Expected values to be strictly deep-equal:[\s\S]*name: 'Ada L'/);
+    assert.equal(parsed.frames[0]?.function, "check");
+  });
+
+  it("reports a Node error's [cause] as the root, with the outer error as its wrapper", () => {
+    const text = [
+      "Error: config failed to load",
+      "    at start (/srv/app/cause.js:3:39)",
+      "    at Object.<anonymous> (/srv/app/cause.js:5:1)",
+      "    ... 5 lines matching cause stack trace ...",
+      "    at node:internal/main/run_main_module:36:49 {",
+      "  [cause]: SyntaxError: Expected property name or '}' in JSON at position 1",
+      "      at JSON.parse (<anonymous>)",
+      "      at load (/srv/app/cause.js:1:31)",
+      "      at start (/srv/app/cause.js:3:9)",
+      "}",
+    ].join("\n");
+    const parsed = parse(text);
+    assert.equal(parsed.errorType, "SyntaxError");
+    assert.deepEqual(parsed.wrappedBy, ["Error: config failed to load"]);
+    assert.deepEqual(parsed.frames.filter((f) => f.own).map((f) => f.function), ["load", "start"]);
+  });
+
+  it("resolves TypeScript imports that name the emitted .js file", async () => {
+    const root = project("ts-esm", {
+      "db.ts": ["export async function getUser(id: number) {", "  return { name: 'Ada' };", "}"],
+      "handler.ts": ['import { getUser } from "./db.js";', "export function profile(id: number) {", "  const user = getUser(id);", "  return user.name.toUpperCase();", "}", "profile(1);"],
+    });
+    const md = await report(root, node(root, "toUpperCase", ["profile (@/handler.ts:4:20)", "Object.<anonymous> (@/handler.ts:6:1)"]));
+    assert.match(hypotheses(md), /Missing `await`.*`getUser` is `async`/);
+  });
+});
+
+describe("blame line mapping", () => {
+  it("maps working-copy lines onto the committed file", async () => {
+    const { mapLine } = await import("../src/source.js");
+    const committed = ["a", "b", "c", "d", "e"];
+    assert.equal(mapLine(committed, ["x", "a", "b", "c", "d", "e"], 3), 2, "a line inserted above shifts it down");
+    assert.equal(mapLine(committed, ["a", "c", "d", "e"], 2), 3, "a line deleted above shifts it up");
+    assert.equal(mapLine(committed, ["a", "b", "C", "d", "e"], 3), null, "a changed line is not committed");
+    assert.equal(mapLine(committed, ["a", "b", "new", "c", "d", "e"], 3), null, "an added line is not committed");
+    assert.equal(mapLine(committed, ["a", "b", "new", "c", "d", "e"], 5), 4);
+    assert.equal(mapLine(committed, committed, 5), 5);
   });
 });
