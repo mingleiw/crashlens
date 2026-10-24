@@ -2,325 +2,192 @@
 
 ![How to make your agent a better debugger than everyone else's agent: 69/81 vs 81/81 root-cause fixes](img/banner-header.png)
 
-Give a coding agent a stack trace and it will fix the line in the stack trace.
-That sounds like the job. Most of the time it is the wrong fix.
+Give a coding agent a crash and it will make the crash go away. That is not
+the same as fixing the bug.
 
-Here is one case from our benchmark. An orders service crashes while
-building a receipt email:
+Here is one test case. An online store crashes while sending a receipt email,
+because the customer is missing. Right next to the crash, a comment in the
+code says customers "can be missing for guest checkouts".
 
-```text
-  File "./notifier.py", line 8, in receipt_email
-    f"Hi {customer.name},\n"
-          ^^^^^^^^^^^^^
-AttributeError: 'NoneType' object has no attribute 'name'
-```
-
-A comment next to the crash says the customer "can be missing for guest
-checkouts". Given only that error, Claude Code produced this in 12 of 18 runs:
+Given only the error, Claude Code "fixed" it like this in **12 of 18 runs**:
 
 ```diff
-  customer = repository.get_customer(order.customer_ref)
 + if customer is None:
-+     # Guest checkout or deleted account: there is no address to send a receipt to.
-+     log.warning("no customer for order %s; skipping receipt", order.id)
-+     return
++     return   # skip the receipt
 ```
 
-The crash is gone. So are all the receipts, forever. The real bug is three
-files away: the API sends `customerId` and `models.py` reads `customer_id`.
-Every order looks like a guest checkout now.
+The crash is gone. So are all the receipts, forever.
 
-The agent did nothing dumb. It read the code it was shown, trusted the comment
-and made the error go away. The problem is what it was shown. The crash line
-is where a bad value was *used*. The bug is where it was *made*. Nothing in a
-stack trace tells you where a value was made.
+The real bug was three files away. The store's API sends the customer as
+`customerId`, and the code reads `customer_id`. One spelling difference, and
+every order looks like a guest checkout.
 
-We built [crashlens](https://github.com/mingleiw/crashlens)
-around that one idea, on top of [REA](https://github.com/morluto/rea)
-(Reverse Engineer Anything) for the native side. Below is what made agents
-better at debugging, what didn't, and the numbers, including the ones that
-don't flatter it.
+The agent didn't do anything stupid. It read the code in front of it, trusted
+the comment, and made the error stop. The problem is what it was looking at.
 
-## 1. Give it provenance, not more logs
+**The line that crashed is where a bad value was used. The bug is where that
+value was made.** An error message only shows you the first place.
 
-The instinct when an agent fails is to give it more: more log lines, more
-files, a bigger context. That didn't fix the receipt bug. The comment was the
-most convincing thing in the context, and more context only adds more
-plausible comments.
+We built [crashlens](https://github.com/mingleiw/crashlens) to show agents the
+second one. It reads the crash and your code, follows the bad value back to
+where it came from, and says what probably went wrong there. It never runs
+your program. For crashes in compiled programs, it's built on
+[REA](https://github.com/morluto/rea) (Reverse Engineer Anything).
+
+Here's what made agents better at debugging, what didn't, and the real
+numbers.
+
+## 1. Show the path, not more logs
+
+When an agent gets it wrong, the instinct is to give it more: more logs, more
+files, more context. That doesn't help when the most convincing thing in the
+context is a wrong comment. More context just means more wrong comments.
+
+What helped was a short trail: this value came from here, which came from
+there, ending at the line where it was made.
 
 ![The crash line is where the value was used. Find where it was made.](img/banner-trace.png)
 
-What worked was a short chain: where the bad value came from, step by step,
-across frames and files. This is what crashlens prints for that crash, from a
-static reading of the repo:
+With that trail added to the prompt, correct fixes went from **6 of 18 to 13
+of 18**.
 
-```markdown
-## Where the bad value came from
-- The bad value is `customer` at `notifier.py:8`.
-- `customer` is a parameter of `receipt_email`, passed as `customer` at `service.py:13`.
-- `customer` is assigned at `service.py:12`: `customer = repository.get_customer(order.customer_ref)`
-- `order` is a parameter of `process`, passed as `Order.from_dict(raw)` at `main.py:10`.
-- `customer_ref` is set from `data.get("customer_id")` at `models.py:23`.
-```
+## 2. Name the suspect
 
-No execution, no SDK, no logging changes. Follow assignments back, and when
-the value is a parameter, go up one frame and read the argument the caller
-passed. The stack trace already lists the frames. It just doesn't connect
-them.
+13 of 18 is better, but the agent still had to spot the spelling difference
+on its own. Sometimes it didn't.
 
-With that trace in the prompt (plus one line: "the lookup found nothing,
-check the key before guarding the crash site"), root-cause fixes went from
-**6/18 to 13/18**.
+So crashlens started checking the code against the project's own sample
+data. When code reads a field that the data spells differently, it says so,
+in plain words:
 
-## 2. Name the cause. Pointing is not enough
+> customer_ref is read from data.get("customer_id"), but no data sample in the
+> project has customer_id; it has customerId.
 
-13/18 is better, not good. The trace pointed at `models.py:23`, and the agent
-still had to notice that `customer_id` was the wrong spelling.
+That made the biggest difference of anything we tried. On four cases like
+this, the error alone led to the right fix in 5 of 20 runs. The report that
+showed the trail but didn't name the field: 9 of 20. The report that named
+it: **20 of 20**.
 
-So the next version checks the key against the project's own data: JSON
-fixtures, OpenAPI schemas, API client code. If the code reads a field that no
-sample has, and a sample has a near miss, it says so:
+The lesson: **pointing at a line leaves room for the agent to guess. Naming
+the suspect gives it something to check.**
 
-```markdown
-- **Field name mismatch.** `customer_ref` is read from `data.get("customer_id")`
-  at `models.py:23`, but no data sample in the project has `customer_id`; it
-  has `customerId` (`api_client.py:5`). If that is this data, read the key it
-  actually uses rather than defaulting the missing value.
-```
+## 3. Look where bugs like to hide
 
-That moved the numbers more than anything else we tried. On four new cases where
-code reads a payload field under the wrong name, the error alone got 5/20 root
-fixes (10/40 over two batches). The report that traced the value but did not
-name the key got **9/20**. The report that names the key got **20/20**.
+Some of the worst bugs hide in boring places. Settings files are a classic.
 
-That is the most useful thing we learned: **an agent with a pointer still
-guesses; an agent with a named hypothesis checks it.** "Look here" leaves room
-for the comment to win. "This key is `customerId` in the data and
-`customer_id` in the code" doesn't.
+A common pattern: load default settings, then load production settings on top.
+If the production file says "database: use this server" and forgets to repeat
+the connection limits, a simple merge throws the limits away. The program
+crashes later, in database code that looks perfectly fine.
 
-The same goes for keys the code computes. A `KeyError` from
-`record[prefix + "_ref"]` used to get no trace, because the key isn't a
-literal in the source. Python prints the evaluated key in the error message
-(`'billing_ref'`), so crashlens takes it from there and checks it like any
-other. Previous report 1/5, new one 5/5.
+crashlens now follows a value through those merges and says which file
+dropped which setting.
 
-## 3. Go where values hide: config merges
+On three cases like this, with a smaller, cheaper model (Haiku), the error
+alone got the right fix in **1 of 15** runs. Our earlier report got 10 of 15.
+The one that names the dropped setting got **15 of 15**.
 
-The bugs that waste the most time are the ones where the value passed through
-something that looks harmless. Config loading is the classic:
+## 4. Read what the error is already telling you
 
-```text
-TypeError: Cannot read properties of undefined (reading 'max')
-    at createPool (./db/pool.js:3:30)
-```
+Error messages often say more than tools use. Modern Java, for example, says
+exactly which variable was empty when it crashed. crashlens takes that and
+follows the variable back to where it went wrong.
 
-`dbConfig.pool` is undefined because `Object.assign({}, defaults, overrides)`
-replaces the whole `db` object, and the production override sets `db` without
-`pool`. The crash is two files from the merge, and the trace used to stop at
-`config.db`, a field of something returned from a function.
+One test case: the code looks up a setting called `region.default`, but the
+settings file calls it `default.region`. Without the hint, Haiku "fixed" it in
+5 of 5 runs by adding a fallback for the missing value. With the hint, all 5
+runs fixed the name.
 
-Following values *through* objects (`loadConfig(...).db.pool` is the `pool`
-field of the `db` field of whatever `loadConfig` returns) gets you to the
-merge, and from there it's mechanical: read the shape of each source and look
-for a later source that sets a top-level key without a nested key an earlier
-one had.
+Across four Java cases, Haiku got the right fix in **11 to 12 of 20** runs from
+the error alone, 12 of 20 with our earlier report, and **20 of 20** with the
+new one.
 
-```markdown
-- **Shallow merge drops a nested key.** `Object.assign({}, defaults, overrides)`
-  at `config/index.js:5` replaces whole top-level values. The source at
-  `config/production.js:2` sets `db` without `pool`, so `db.pool` from
-  `config/defaults.js:3` is lost. Merge nested objects deeply, or set `pool`
-  in that override.
-```
+## 5. No source code? Read the crash itself
 
-On three merge cases (JS `Object.assign`, JS spread, Python `{**a, **b}`), the
-smaller model (Haiku) got **1/15** root fixes from the error alone, **10/15**
-with the previous report and **15/15** with this one. On the Python case the
-previous report stopped at `settings["cache"]` and Haiku guarded the crash
-site in 5 of 5 runs.
+The hardest case: a compiled program crashes on a server, you only have the
+crash dump, and the program was built without debugging info. To an agent,
+that's a wall of hex numbers.
 
-## 4. Use what the runtime already tells you
+Here REA and Ghidra (the NSA's open-source decompiler) do the heavy lifting.
+They turn the machine code around the crash back into readable code, so the
+agent sees something like "this memory was freed, then used" instead of
+addresses.
 
-Runtimes are better at saying what went wrong than most tools give them
-credit for. Since JDK 15 (JEP 358, on by default), the JVM's NullPointerException
-message names the null:
+With that, the agent reached the root cause in **1 turn instead of 4**, at
+about a third less cost. On 7 kinds of crashes with no source code available,
+it found the right cause in 6 and narrowed down the 7th.
 
-```text
-java.lang.NullPointerException: Cannot invoke "com.acme.Customer.tier()" because "<local2>" is null
-	at com.acme.InvoiceService.invoiceLine(InvoiceService.java:16)
-```
+## 6. Stay quiet when you're not sure
 
-That's a slot number, because this class was compiled without `-g`. javac
-numbers slots predictably: `this`, then the parameters (`long` and `double`
-take two), then locals in declaration order, reusing a block's slots once it
-closes. So you can map `<local2>` back to a name, check it against the type in
-the message (`Customer`), and keep tracing:
+A tool that's confidently wrong is worse than no tool, because agents believe
+it. Every check in crashlens has rules for when to say nothing: when the data
+comes from outside the project, when a value is filled in by a framework,
+when the code is too unclear to follow.
 
-```markdown
-- `<local2>` in the message is the local variable `customer` (slot 2; the class
-  was compiled without `-g`, so the JVM only knows the slot).
-- `customer` is assigned `customers.find(order.email())` at `InvoiceService.java:13`.
-- `find(...)` returns `byEmail.get(email)` at `CustomerRepository.java:15`.
-
-- **Key normalized on write, not on read.** `CustomerRepository.java:11` stores
-  entries under `customer.email().toLowerCase(Locale.ROOT)`, but
-  `byEmail.get(email)` looks up the key as given, without `toLowerCase()`.
-```
-
-Don't trust a mapping like that on vibes. We compiled 13 method layouts with
-and without `-g` and compared crashlens's answer with the real variable name.
-That caught a real wrong answer (in `String a = "a", b = null;` it named `a`
-instead of `b`) and one where it gave up when it shouldn't have (an
-anonymous class inside the method). All 13
-match now, and when the slot and the type disagree it names nothing.
-
-On four Java cases with the bug in another file, Haiku fixed the root cause in
-**11/20** and **12/20** runs from the error alone (two batches), **12/20**
-with the previous report and **20/20** with the new one. The clearest single
-case: code reads `region.default`, and `app.properties` has `default.region`.
-Without the hypothesis, Haiku guarded the crash site in 5 of 5 runs. One of
-them:
-
-```diff
--        String region = settings.get("region.default").trim();
-+        String region = settings.get("region.default");
-+        if (region == null || region.isBlank()) {
-+            region = "us-east-1";
-+        }
-```
-
-With it, 5 of 5 changed the key to `default.region`. (Some kept a fallback
-too. Fine.)
-
-## 5. When there's no source: read the program itself
-
-Native crashes are where agents are weakest, because a core dump is not text.
-For that side crashlens is built on REA, which reads the recorded crash
-(signal, fault address, registers, mapped files) and the binary's layout.
-Three things mattered:
-
-- **Check the binary is the one that crashed.** The binary's GNU build ID is
-  compared with the image the process actually ran. A rebuilt binary gives
-  confident, wrong answers otherwise.
-- **Name every function, even stripped.** Function boundaries come from
-  `.eh_frame`, which every binary keeps for unwinding, so a stripped address
-  becomes `sub_120a+0x31` instead of a hex number.
-- **Decompile the crash and its caller.** With Ghidra installed, REA
-  decompiles both, labeled as decompiler output, not your source:
-
-```c
-// Decompiled caller `sub_11f8` (REA + ghidra: decompiler output, not your source)
-__ptr = malloc(0x20);
-*__ptr = FUN_001011a9;
-free(__ptr);
-__s = malloc(0x20);
-memset(__s,0x41,0x20);
-FUN_001011d4(__ptr,7);        // calls through the freed pointer: use after free
-```
-
-With the decoded core and pseudocode, the agent went from 4 turns to 1 to
-reach the root cause and cost dropped by about a third. On 7 kinds of crashes
-with stripped binaries and no source, agents using crashlens found the right
-root cause in 6 and narrowed the 7th (a divide by zero) to the caller that
-passed the zero.
-
-## 6. Say nothing when you don't know
-
-A hypothesis tool that's wrong 10% of the time is worse than none, because
-agents believe it. Every check in crashlens has guards that keep it quiet:
-
-- No "no code writes this key" claim when the data comes from `json.loads`
-  or a request, since its keys come from outside the codebase.
-- No "shallow merge" when the merge is deep, the override keeps the key, or a
-  source is loaded at runtime and can't be read statically.
-- No "field never assigned" when the field is injected (`@Autowired`,
-  `@Inject`, Lombok) or isn't private.
-- No property-key hypothesis unless the class names the file it loads, and
-  only key names in the output, never values.
-
-Each new check also gets an old-vs-new diff of the full report on every
-existing bench case. For the Java work, all 21 Python and JavaScript reports
-came out byte-identical. And every hypothesis is labeled as a static reading:
-"verify before acting".
+When we added the Java checks, we made sure reports for every other test case
+stayed exactly the same. And everything crashlens suggests is labeled as a
+guess to verify, not a fact.
 
 ## The scoreboard
 
-The harness is in the repo (`bench/`). Each case is a small project that
-crashes. The agent (Claude Code, headless) gets the error output (A), or the
-error plus the crashlens report (B), and edits a fresh copy. Each diff is
-scored as a root-cause fix or a symptom guard.
+We test this with a set of small crashing projects. A coding agent (Claude
+Code) gets either the error alone or the error plus the crashlens report, then
+we check whether it fixed the real bug or just hid the crash.
 
 ![Root-cause fixes with the error alone vs with the crashlens report](img/results.png)
 
-| Benchmark | Error only | With crashlens |
-| --- | --- | --- |
-| Misleading comment, bug 3 files away (18 runs) | 6/18 | **13/18** |
-| Payload field read under the wrong name (4 cases) | 5/20 (10/40 over two batches) | **20/20** |
-| Nested config key dropped by a shallow merge, Haiku (3 cases) | 1/15 | **15/15** |
-| Java NullPointerException, bug in another file, Haiku (4 cases) | 11/20, 12/20 | **20/20** |
-| Case-mismatched id, smaller model (3 runs) | 0/3 | **3/3** |
-| Stripped binary + core dump: turns to the root cause | 4 | **1** |
-| **All 27 cases × 3, default model** | **69/81** | **81/81** |
+Across all 27 test cases, three runs each, with Claude's default model:
 
-All 12 misses in that last row are symptom guards: a null check or a default
-at the crash site, which is exactly the fix from the top of this article.
+- **Error alone: 69 of 81** runs fixed the real bug.
+- **With crashlens: 81 of 81.**
+
+Every one of the 12 misses was the same move from the top of this article:
+hide the crash where it happened.
 
 ## What we're not claiming
 
-**We wrote the cases.** 27 small repos, each with one bug and usually a
-misleading comment. 19 are "held out", meaning written before the check they
-test existed, but we've looked at the reports on most of them since.
-This is a regression suite for an idea, not a study.
+**We wrote the test cases.** They're 27 small projects, most with a
+misleading comment planted near the crash. This is a test suite for an idea,
+not a scientific study.
 
-**The strong model mostly doesn't need it.** On the four Java cases the
-default model fixed all 20 runs with or without the new report; the report
-only cut turns (6.9 to 4.4 on average). On the merge cases it got 14/15
-alone. The big swings are on Haiku, and on cases built to mislead.
+**Strong models mostly don't need it.** Claude's default model fixed nearly
+all the Java cases without crashlens (39 of 40 runs). There, the report mostly made it faster. The
+big jumps are with smaller models and with cases designed to mislead.
 
-**It didn't help on Java cases we didn't build for.** After the Java trace was
-done we wrote two more cases and didn't tune on them: an enum name against a
-wire-format string, and a constructor overload that never sets a field.
-Haiku got 6/10 with the previous report and 5/10 with the new one. The strong
-model got 10/10 with both. When the cause isn't one the trace can name, you
-get a trace and nothing more.
+**It didn't help on cases we didn't plan for.** After finishing the Java
+support, we wrote two new Java cases with kinds of bugs crashlens doesn't
+recognize. It made no difference: Haiku got 6 of 10 with the old report and
+5 of 10 with the new one.
 
-**Batches vary a lot.** The same no-crashlens condition got 1/5 in one batch
-and 4/5 in another on the computed-key case. Five runs per cell is enough to
-see a 1/15 vs 15/15 gap, not a 4/5 vs 5/5 one.
+**Results vary run to run.** The same setup scored 1 of 5 one time and 4 of 5
+the next. Five runs is enough to see 1 of 15 vs 15 of 15, not small gaps.
 
-**Scoring is regex, and we got it wrong twice.** One root-cause pattern used
-`(?m)`, which JavaScript doesn't support, and crashed a run mid-batch. Another
-was too narrow and scored real fixes as guards in both conditions. After
-widening it we read the diffs and rescored every run of that case with the same
-pattern. Read the diffs before you quote numbers, including ours.
+**Our scoring had bugs too.** Twice we found our automatic grading was wrong
+and fixed it, then re-graded every affected run the same way. Read the actual
+fixes before trusting anyone's numbers, ours included.
 
-**Some things didn't move at all.** When the failure output already prints
-the variables (pytest `--showlocals`, a Sentry event), the agent got 5/5
-without crashlens: with the values on screen, it reads them itself. On
-single-file bugs, the report only added tokens.
+**Some things made no difference.** When the error already showed the values
+of the variables, the agent found the bug without help. On simple one-file
+bugs, the report just added reading.
 
-## If you're building this into your own agent
+## If you're building an agent
 
-1. **Trace backward from the crash line.** Assignments, then the caller's
-   argument, across files. Stop and say nothing when scope gets unclear.
-2. **Turn traces into named hypotheses** that point at a line on each side:
-   "written as X here, read as Y there".
-3. **Check against the repo's own data.** Fixtures, schemas and properties
-   files are ground truth the agent ignores unless you put them in front of it.
-4. **Read the runtime's own words.** Evaluated keys in `KeyError`, the NPE
-   message, the build ID in a core. They're more precise than your parser.
-5. **Verify your inference against a compiler.** If you map slots, offsets or
-   frames, test the mapping against a build with debug info.
-6. **Keep a benchmark with misleading comments,** score root cause vs guard,
-   and keep the runs you wish hadn't happened.
+1. **Follow the bad value back.** Show where it was made, not just where it
+   crashed.
+2. **Name the suspect.** "Spelled X here, Y there" beats "look at this line".
+3. **Check the code against the project's own data.** Sample files and
+   settings files are ground truth that agents ignore unless you show them.
+4. **Use what the error already says.** It's often more precise than you think.
+5. **Stay quiet when unsure.** A wrong hint costs more than no hint.
+6. **Test on cases built to mislead,** and count "hid the crash" as a failure.
 
-crashlens is MIT-licensed, never runs your program, and works offline. Try it
-in Claude Code:
+crashlens is free and open source, works offline, and never runs your
+program. Try it in Claude Code:
 
 ```text
 /plugin install crashlens --marketplace mingleiw/crashlens
 ```
 
-or paste a stack trace into the [live demo](https://mingleiw.github.io/crashlens/).
+Or paste a stack trace into the [live demo](https://mingleiw.github.io/crashlens/).
 If you have a crash that stumped your agent, open an issue. Real crashes make
 better test cases than ours.
