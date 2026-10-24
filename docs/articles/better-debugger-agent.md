@@ -1,6 +1,10 @@
-# How to make Claude Code a better debugger than everyone else's, with REA
+# How REA makes Claude Code a better debugger than everyone else's
 
 ![Claude Code + REA: a better debugger than everyone else's](img/banner-header.png)
+
+**Your AI isn't fixing bugs. It's hiding bodies.**
+
+![How REA makes Claude Code a better debugger. Your AI isn't fixing bugs, it's hiding bodies. Error alone vs with REA + value trace: 69 to 81 real fixes out of 81 runs.](img/post-hiding-bodies.png)
 
 Give a coding agent a crash and it will make the crash go away. That is not
 the same as fixing the bug.
@@ -152,7 +156,7 @@ fixed the real bug or just hid the crash.
 Across all 27 test cases, three runs each, with Claude's default model:
 
 - **Error alone: 69 of 81** runs fixed the real bug.
-- **With the report: 81 of 81.**
+- **With REA plus the value trace: 81 of 81.**
 
 Every one of the 12 misses was the same move from the top of this article:
 hide the crash where it happened.
