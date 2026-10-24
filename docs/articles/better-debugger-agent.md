@@ -1,6 +1,6 @@
-# How to make your agent a better debugger than everyone else's, with REA
+# How to make Claude Code a better debugger than everyone else's, with REA
 
-![Make your agent a better debugger than everyone else's, with REA](img/banner-header.png)
+![Claude Code + REA: a better debugger than everyone else's](img/banner-header.png)
 
 Give a coding agent a crash and it will make the crash go away. That is not
 the same as fixing the bug.
