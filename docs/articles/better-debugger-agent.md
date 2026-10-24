@@ -1,6 +1,6 @@
-# How to make your agent a better debugger than everyone else's agent
+# How to make your agent a better debugger than everyone else's, with REA
 
-![How to make your agent a better debugger than everyone else's agent: 69/81 vs 81/81 root-cause fixes](img/banner-header.png)
+![Make your agent a better debugger than everyone else's, with REA](img/banner-header.png)
 
 Give a coding agent a crash and it will make the crash go away. That is not
 the same as fixing the bug.
