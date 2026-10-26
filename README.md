@@ -240,6 +240,9 @@ What we have seen so far:
 **Native crashes (core dumps)**
 
 - NULL and near-NULL pointer dereferences
+- calls through a NULL function pointer, traced in the caller's machine code to
+  the slot it was loaded from, read back from the core, and placed in the
+  binary (e.g. "a table in `.data.rel.ro`") or the heap
 - stack overflow (runaway recursion, huge stack buffers)
 - invalid memory access, writes to read-only memory, jumps to non-executable memory
 - general protection faults (garbage pointers)
@@ -313,6 +316,14 @@ and machines.
 - **Native hypotheses**: a register holding a fill pattern (`0x4141…`) rather
   than a pointer, and a use after free visible in the decompiled caller
   (`free(p)` followed by a use of `p`), with the `memset` that overwrote it.
+  For a call to address 0 it walks back from the indirect call along every
+  path that reaches it, skips the ones that test the target for NULL, and
+  names the load left over, the NULL checks that sent execution there, what
+  the base register points into and the slots' values in the core, plus their
+  source lines when the binary has line info (`addr2line`). On binutils
+  [PR 31872](https://sourceware.org/bugzilla/show_bug.cgi?id=31872) this
+  names the AMDGPU backend table (`elf64_bed` from `elf64-amdgcn.c`) with both
+  relocation hooks unset, from a stripped binary.
 - **What it was doing**: the log lines printed just before the failure (or
   your app log via `--log app.log` for core dumps), so you can see which
   request, order or user triggered it.
@@ -417,7 +428,7 @@ reads the program itself:
 | Step | Tool | What it learns |
 | --- | --- | --- |
 | 1 | `rea inspect-recorded-crash` | signal, fault address, registers, mapped files |
-| 2 | `rea inspect-binary-layout` | function symbols, segments, build hardening |
+| 2 | `rea inspect-binary-layout` | function symbols, segments, build hardening (if REA cannot answer, e.g. its result for a large binary is over its 64 MiB reply budget, crashlens reads segments and symbols from the ELF headers itself and says so) |
 | 3 | crashlens | where the binary was loaded, so any address becomes `function+offset`; whether the binary's build ID matches the image that ran; function boundaries from `.eh_frame` when there are no symbols |
 | 4 | `gdb` (optional, core file only) | backtrace, inlined frames, source lines, disassembly |
 | 5 | `objdump` (optional) | the crashing function's code around the fault |

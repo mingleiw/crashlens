@@ -1,5 +1,5 @@
 import { hex } from "./symbolize.js";
-import type { TriageReport } from "./triage.js";
+import type { SlotReading, TriageReport } from "./triage.js";
 
 /**
  * Hypotheses read off a core triage report: register values that are fill
@@ -8,6 +8,8 @@ import type { TriageReport } from "./triage.js";
  */
 export function nativeHypotheses(report: TriageReport): string[] {
   const out: string[] = [];
+  const nullCall = nullCallHypothesis(report);
+  if (nullCall !== null) out.push(nullCall);
   const fills = new Map<number, string>();
   for (const reg of report.relevantRegisters) {
     const byte = repeatedByte(reg.value);
@@ -68,4 +70,47 @@ function useAfterFree(pseudocode: string): { free: string; pointer: string; use:
     }
   }
   return null;
+}
+
+const at = (line: string | null) => (line === null ? "" : ` (\`${line}\`)`);
+const slotName = (reading: SlotReading) => `[${reading.slot.base}${reading.slot.offset === 0n ? "" : `+${hex(reading.slot.offset)}`}]`;
+const slotValue = (reading: SlotReading) =>
+  reading.value === null ? "not recorded in the core" : reading.value === 0n ? "0 (NULL) in the core" : `\`${hex(reading.value)}\` in the core`;
+
+/** Where a NULL function pointer was loaded, and what the core says about that slot. */
+function nullCallHypothesis(report: TriageReport): string | null {
+  const nullCall = report.nullCall ?? null;
+  if (nullCall === null) return null;
+  const { trace } = nullCall;
+  const call = `\`${trace.callText}\` at \`${hex(trace.callAddress)}\` in \`${nullCall.caller}\``;
+  const targets = nullCall.slots.filter((reading) => reading.role === "target");
+  const checks = nullCall.slots.filter((reading) => reading.role === "check");
+  if (targets.length === 0) {
+    if (trace.sources.length === 0) return null;
+    const how = trace.sources.map((source) => `\`${source.text}\` at \`${hex(source.address)}\``).join(", ");
+    return `**NULL function pointer.** ${call} called \`${trace.register}\` = 0, set by ${how} on the path${trace.sources.length > 1 ? "s" : ""} that do not test it for NULL first.`;
+  }
+  const target = targets[0] as SlotReading;
+  const parts = [
+    `**NULL function pointer${target.builtIn ? " from a table built into the binary" : ""}.** ${call} called ${trace.register === null ? "a NULL slot" : `\`${trace.register}\` = 0`}.`,
+  ];
+  if (trace.register !== null) {
+    const load = trace.sources.find((source) => source.kind === "load" && source.address === target.slot.address);
+    const guarded = trace.guardedPaths > 0 ? `${trace.guardedPaths} of the ${trace.guardedPaths + trace.sources.length} paths into that call test \`${trace.register}\` for NULL first; the` : "The";
+    const checkLines = [...new Set(checks.flatMap((check) => (check.line === null ? [] : [check.line])))];
+    parts.push(`${guarded} unguarded one loads it with \`${target.slot.text}\` at \`${hex(target.slot.address)}\`${at(target.line)}${load !== undefined && load.kind === "load" && load.reachedWhenNull.length > 0 ? `, which runs only when ${[...new Set(load.reachedWhenNull.map((check) => `\`[${check.base}${check.offset === 0n ? "" : `+${hex(check.offset)}`}]\``))].join(" or ")} was NULL${checkLines.length === 0 ? "" : ` (checked at ${checkLines.map((line) => `\`${line}\``).join(", ")})`}: a fallback` : ""}.`);
+    const callLine = report.firstOwnFrame?.source ?? null;
+    if (target.line !== null && callLine !== null && !callLine.endsWith(target.line.replace(/^.*\//, "/")) && !callLine.endsWith(`:${target.line.split(":").pop()}`))
+      parts.push(`The backtrace puts the call at \`${callLine}\` because the compiler shares one call instruction between branches; the NULL target is the one loaded at \`${target.line}\`.`);
+  }
+  if (target.baseValue !== null)
+    parts.push(`\`${target.slot.base}\` = \`${hex(target.baseValue)}\` points into ${target.region ?? "unknown memory"}; \`${slotName(target)}\` is ${slotValue(target)}${checks.length === 0 ? "" : `, and ${checks.map((check) => `\`${slotName(check)}\` is ${slotValue(check)}`).join(", ")}`}.`);
+  const allNull = [target, ...checks].every((reading) => reading.value === 0n);
+  if (target.builtIn)
+    parts.push(
+      `That memory is a table the program was built with, not heap data, so this is not memory corruption: ${allNull && checks.length > 0 ? "none of the handlers this code tries is set in that table, and the fallback calls the last one without checking it" : "the entry was never filled in"}. Fix the table (add the missing entry) or make the code check for it before calling; do not just guard the crash.`,
+    );
+  else if (target.region === "memory not backed by a file (heap or mmap)")
+    parts.push("That is a runtime object: find where this field is set, and whether the object was fully initialized or already freed when it was called.");
+  return parts.join(" ");
 }

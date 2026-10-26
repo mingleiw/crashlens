@@ -3,6 +3,7 @@ import { hex } from "./symbolize.js";
 
 export type CrashKind =
   | "null-pointer-dereference"
+  | "null-function-call"
   | "stack-overflow"
   | "invalid-memory-access"
   | "execute-non-executable"
@@ -166,6 +167,21 @@ function classifySegv(
         "Rerun the reproducer under AddressSanitizer or Valgrind to catch the bad write earlier.",
       ],
       confidence: "medium",
+    };
+  if (address !== null && signal.code === 1 && address < NULL_PAGE_LIMIT && pc === address)
+    return {
+      kind: "null-function-call",
+      title: "Call through a NULL function pointer",
+      signalName,
+      explanation:
+        address === 0n
+          ? "The program called address 0x0: a function pointer, callback or table entry it called was NULL. The faulting frame has no code; the caller holds the indirect call."
+          : `The program jumped to ${hex(address)}, a small offset from NULL: most likely a function pointer read from a table or object that was NULL.`,
+      nextSteps: [
+        "Look at the indirect call in the caller frame and find where its target register was loaded.",
+        "Decide whether that slot should always be set (a missing entry where it is filled in) or may be empty (the caller must check it).",
+      ],
+      confidence: "high",
     };
   if (address !== null && signal.code === 1 && address < NULL_PAGE_LIMIT)
     return {

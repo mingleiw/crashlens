@@ -18,13 +18,24 @@ const AFTER = 4;
  * is the instruction containing `target`. Returns null when objdump is missing
  * or prints nothing for the range.
  */
-export function disassembleAround(
+export async function disassembleAround(
   binaryPath: string,
   start: bigint,
   end: bigint,
   target: bigint,
   objdump = "objdump",
 ): Promise<DisasmLine[] | null> {
+  const lines = await disassembleFunction(binaryPath, start, end, objdump);
+  return lines === null ? null : windowAround(lines, target);
+}
+
+/** Every instruction of one function, or null when objdump is missing or fails. */
+export function disassembleFunction(
+  binaryPath: string,
+  start: bigint,
+  end: bigint,
+  objdump = "objdump",
+): Promise<{ address: bigint; text: string }[] | null> {
   const args = [
     "-d",
     "--no-show-raw-insn",
@@ -40,7 +51,30 @@ export function disassembleAround(
         resolve(null);
         return;
       }
-      resolve(windowAround(parseObjdump(stdout), target));
+      resolve(parseObjdump(stdout));
+    });
+  });
+}
+
+/**
+ * Source line of each link-time address from the binary's DWARF line table
+ * (binutils addr2line; static). Addresses without line info are left out.
+ */
+export function sourceLines(binaryPath: string, addresses: readonly bigint[], addr2line = "addr2line"): Promise<Map<bigint, string>> {
+  if (addresses.length === 0) return Promise.resolve(new Map());
+  const args = ["-e", binaryPath, ...addresses.map((address) => `0x${address.toString(16)}`)];
+  return new Promise((resolve) => {
+    execFile(addr2line, args, { timeout: OBJDUMP_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      const lines = new Map<bigint, string>();
+      if (!error)
+        stdout.split("\n").forEach((line, i) => {
+          const address = addresses[i];
+          const match = /^(.+):(\d+)(?: \(discriminator \d+\))?$/.exec(line.trim());
+          if (address === undefined || match === null || match[1] === "??" || match[2] === "0") return;
+          // Build paths are long and machine-specific: keep what follows the last "../".
+          lines.set(address, `${(match[1] as string).split("../").pop()}:${match[2]}`);
+        });
+      resolve(lines);
     });
   });
 }

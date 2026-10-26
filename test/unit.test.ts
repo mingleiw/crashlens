@@ -195,6 +195,12 @@ describe("classify", () => {
     );
   });
 
+  it("calls a jump to address 0 a NULL function call, not a NULL dereference", () => {
+    assert.equal(classify({ signal: segv(1, 0n), pc: 0n, sp: 0x7000n }).kind, "null-function-call");
+    assert.equal(classify({ signal: segv(1, 0x8n), pc: 0x8n, sp: 0x7000n }).kind, "null-function-call");
+    assert.equal(classify({ signal: segv(1, 0n), pc: 0x401000n, sp: 0x7000n }).kind, "null-pointer-dereference");
+  });
+
   it("separates permission faults, jumps to data and non-canonical pointers", () => {
     assert.equal(
       classify({ signal: segv(2, 0x4000n), pc: 0x4000n, sp: null }).kind,

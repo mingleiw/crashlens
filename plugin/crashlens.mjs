@@ -40,6 +40,8 @@ async function detectFile(path) {
 import { basename } from "node:path";
 
 // src/elf.ts
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { open as open2 } from "node:fs/promises";
 var PT_LOAD = 1;
 var PT_NOTE = 4;
@@ -237,6 +239,118 @@ async function functionRanges(path) {
     await file.close();
   }
 }
+var SHT_SYMTAB = 2;
+var SHT_DYNSYM = 11;
+var STT_OBJECT = 1;
+var STT_FUNC = 2;
+var STT_FILE = 4;
+var STB_LOCAL = 0;
+var MAX_SECTIONS = 1 << 16;
+var MAX_SYMTAB_BYTES = 512 << 20;
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+async function readSections(file) {
+  const ehdr = await readAt(file, 0n, 64);
+  if (ehdr.length < 64) return [];
+  const shoff = ehdr.readBigUInt64LE(40);
+  const shentsize = ehdr.readUInt16LE(58);
+  const shnum = ehdr.readUInt16LE(60);
+  if (shoff === 0n || shentsize < 64 || shnum > MAX_SECTIONS) return [];
+  const table = await readAt(file, shoff, shentsize * shnum);
+  const sections = [];
+  for (let i = 0; (i + 1) * shentsize <= table.length; i++) {
+    const base = i * shentsize;
+    sections.push({
+      nameOffset: table.readUInt32LE(base),
+      type: table.readUInt32LE(base + 4),
+      addr: table.readBigUInt64LE(base + 16),
+      offset: table.readBigUInt64LE(base + 24),
+      size: table.readBigUInt64LE(base + 32),
+      link: table.readUInt32LE(base + 40),
+      entsize: table.readBigUInt64LE(base + 56)
+    });
+  }
+  return sections;
+}
+async function readSymbols(file, sections) {
+  const symtab = sections.find((s) => s.type === SHT_SYMTAB) ?? sections.find((s) => s.type === SHT_DYNSYM);
+  const strtab = symtab === void 0 ? void 0 : sections[symtab.link];
+  if (symtab === void 0 || strtab === void 0 || symtab.entsize < 24n || symtab.size > BigInt(MAX_SYMTAB_BYTES) || strtab.size > BigInt(MAX_SYMTAB_BYTES)) return [];
+  const symbols = await readAt(file, symtab.offset, Number(symtab.size));
+  const strings = await readAt(file, strtab.offset, Number(strtab.size));
+  const entsize = Number(symtab.entsize);
+  const out = [];
+  let sourceFile = null;
+  for (let pos = 0; pos + 24 <= symbols.length; pos += entsize) {
+    const nameOffset = symbols.readUInt32LE(pos);
+    const info = symbols[pos + 4];
+    const shndx = symbols.readUInt16LE(pos + 6);
+    const value = symbols.readBigUInt64LE(pos + 8);
+    if (nameOffset >= strings.length) continue;
+    if ((info & 15) === STT_FILE) {
+      sourceFile = cString(strings, nameOffset) || null;
+      continue;
+    }
+    if (shndx === 0 || value === 0n) continue;
+    const local = info >> 4 === STB_LOCAL;
+    const name = cString(strings, nameOffset);
+    if (name !== "") out.push({ name, type: info & 15, value, size: symbols.readBigUInt64LE(pos + 16), file: local ? sourceFile : null });
+  }
+  return out;
+}
+function cString(bytes, offset) {
+  const end = bytes.indexOf(0, offset);
+  return bytes.subarray(offset, end === -1 ? bytes.length : end).toString("utf8");
+}
+async function elfLayout(path) {
+  const file = await open2(path, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null || headers.type !== 2 && headers.type !== 3) return null;
+    const symbols = await readSymbols(file, await readSections(file));
+    return {
+      sha256: await sha256File(path),
+      imageType: headers.type === 3 ? "ET_DYN" : "ET_EXEC",
+      loadSegments: headers.phdrs.filter((ph) => ph.type === PT_LOAD).map((ph) => ({ offset: ph.offset, virtualAddress: ph.vaddr })),
+      functions: symbols.filter((symbol) => symbol.type === STT_FUNC).map(({ name, value, size }) => ({ name, value, size }))
+    };
+  } finally {
+    await file.close();
+  }
+}
+async function describeLinkedAddress(path, linked) {
+  const file = await open2(path, "r");
+  try {
+    const sections = await readSections(file);
+    const names = sections[ehdrShstrndx(await readAt(file, 0n, 64))];
+    const holder = sections.find((s) => s.addr !== 0n && linked >= s.addr && linked < s.addr + s.size);
+    let section = null;
+    if (holder !== void 0 && names !== void 0 && names.size <= BigInt(MAX_NOTE_BYTES))
+      section = cString(await readAt(file, names.offset, Number(names.size)), holder.nameOffset) || null;
+    const object = (await readSymbols(file, sections)).find(
+      (symbol) => symbol.type === STT_OBJECT && linked >= symbol.value && linked < symbol.value + (symbol.size === 0n ? 1n : symbol.size)
+    );
+    return { section, symbol: object === void 0 ? null : { name: object.name, offset: linked - object.value, file: object.file } };
+  } finally {
+    await file.close();
+  }
+}
+function ehdrShstrndx(ehdr) {
+  return ehdr.length < 64 ? -1 : ehdr.readUInt16LE(62);
+}
+async function readCoreBytes(corePath, address, length) {
+  const file = await open2(corePath, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null || headers.type !== 4) return null;
+    return await readCoreMemory(file, headers.phdrs.filter((ph) => ph.type === PT_LOAD), address, length);
+  } finally {
+    await file.close();
+  }
+}
 function rangeFor(ranges, linked) {
   let lo = 0;
   let hi = ranges.length - 1;
@@ -325,14 +439,16 @@ var hex = (value) => `0x${value.toString(16)}`;
 // src/nativeHints.ts
 function nativeHypotheses(report) {
   const out = [];
+  const nullCall = nullCallHypothesis(report);
+  if (nullCall !== null) out.push(nullCall);
   const fills = /* @__PURE__ */ new Map();
-  for (const reg of report.relevantRegisters) {
-    const byte = repeatedByte(reg.value);
+  for (const reg2 of report.relevantRegisters) {
+    const byte = repeatedByte(reg2.value);
     if (byte === null) continue;
-    fills.set(byte, reg.name);
+    fills.set(byte, reg2.name);
     const ch = byte >= 32 && byte < 127 ? ` ('${String.fromCharCode(byte)}')` : "";
     out.push(
-      `**Overwritten memory.** \`${reg.name}\` = \`${hex(reg.value)}\` is the byte \`0x${byte.toString(16)}\`${ch} repeated: not a pointer the program computed, but memory filled by \`memset\`, a string copy or input data. The object it was loaded from was overwritten, often after it was freed and its memory reused.`
+      `**Overwritten memory.** \`${reg2.name}\` = \`${hex(reg2.value)}\` is the byte \`0x${byte.toString(16)}\`${ch} repeated: not a pointer the program computed, but memory filled by \`memset\`, a string copy or input data. The object it was loaded from was overwritten, often after it was freed and its memory reused.`
     );
   }
   for (const fn of report.decompiled) {
@@ -379,6 +495,45 @@ function useAfterFree(pseudocode) {
     }
   }
   return null;
+}
+var at = (line) => line === null ? "" : ` (\`${line}\`)`;
+var slotName = (reading) => `[${reading.slot.base}${reading.slot.offset === 0n ? "" : `+${hex(reading.slot.offset)}`}]`;
+var slotValue = (reading) => reading.value === null ? "not recorded in the core" : reading.value === 0n ? "0 (NULL) in the core" : `\`${hex(reading.value)}\` in the core`;
+function nullCallHypothesis(report) {
+  const nullCall = report.nullCall ?? null;
+  if (nullCall === null) return null;
+  const { trace } = nullCall;
+  const call = `\`${trace.callText}\` at \`${hex(trace.callAddress)}\` in \`${nullCall.caller}\``;
+  const targets = nullCall.slots.filter((reading) => reading.role === "target");
+  const checks = nullCall.slots.filter((reading) => reading.role === "check");
+  if (targets.length === 0) {
+    if (trace.sources.length === 0) return null;
+    const how = trace.sources.map((source) => `\`${source.text}\` at \`${hex(source.address)}\``).join(", ");
+    return `**NULL function pointer.** ${call} called \`${trace.register}\` = 0, set by ${how} on the path${trace.sources.length > 1 ? "s" : ""} that do not test it for NULL first.`;
+  }
+  const target = targets[0];
+  const parts = [
+    `**NULL function pointer${target.builtIn ? " from a table built into the binary" : ""}.** ${call} called ${trace.register === null ? "a NULL slot" : `\`${trace.register}\` = 0`}.`
+  ];
+  if (trace.register !== null) {
+    const load = trace.sources.find((source) => source.kind === "load" && source.address === target.slot.address);
+    const guarded = trace.guardedPaths > 0 ? `${trace.guardedPaths} of the ${trace.guardedPaths + trace.sources.length} paths into that call test \`${trace.register}\` for NULL first; the` : "The";
+    const checkLines = [...new Set(checks.flatMap((check) => check.line === null ? [] : [check.line]))];
+    parts.push(`${guarded} unguarded one loads it with \`${target.slot.text}\` at \`${hex(target.slot.address)}\`${at(target.line)}${load !== void 0 && load.kind === "load" && load.reachedWhenNull.length > 0 ? `, which runs only when ${[...new Set(load.reachedWhenNull.map((check) => `\`[${check.base}${check.offset === 0n ? "" : `+${hex(check.offset)}`}]\``))].join(" or ")} was NULL${checkLines.length === 0 ? "" : ` (checked at ${checkLines.map((line) => `\`${line}\``).join(", ")})`}: a fallback` : ""}.`);
+    const callLine = report.firstOwnFrame?.source ?? null;
+    if (target.line !== null && callLine !== null && !callLine.endsWith(target.line.replace(/^.*\//, "/")) && !callLine.endsWith(`:${target.line.split(":").pop()}`))
+      parts.push(`The backtrace puts the call at \`${callLine}\` because the compiler shares one call instruction between branches; the NULL target is the one loaded at \`${target.line}\`.`);
+  }
+  if (target.baseValue !== null)
+    parts.push(`\`${target.slot.base}\` = \`${hex(target.baseValue)}\` points into ${target.region ?? "unknown memory"}; \`${slotName(target)}\` is ${slotValue(target)}${checks.length === 0 ? "" : `, and ${checks.map((check) => `\`${slotName(check)}\` is ${slotValue(check)}`).join(", ")}`}.`);
+  const allNull = [target, ...checks].every((reading) => reading.value === 0n);
+  if (target.builtIn)
+    parts.push(
+      `That memory is a table the program was built with, not heap data, so this is not memory corruption: ${allNull && checks.length > 0 ? "none of the handlers this code tries is set in that table, and the fallback calls the last one without checking it" : "the entry was never filled in"}. Fix the table (add the missing entry) or make the code check for it before calling; do not just guard the crash.`
+    );
+  else if (target.region === "memory not backed by a file (heap or mmap)")
+    parts.push("That is a runtime object: find where this field is set, and whether the object was fully initialized or already freed when it was called.");
+  return parts.join(" ");
 }
 
 // src/coreIssue.ts
@@ -429,7 +584,7 @@ function toCoreIssue(report) {
     });
   if (report.relevantRegisters.length > 0)
     sections.push({
-      heading: "Registers used by the faulting instruction",
+      heading: report.nullCall == null ? "Registers used by the faulting instruction" : "Registers at the NULL call",
       kind: "list",
       items: report.relevantRegisters.map(
         (entry) => `\`${entry.name}\` = \`${hex(entry.value)}\`${entry.value === 0n ? " \u2190 NULL" : ""}`
@@ -484,7 +639,7 @@ function toCoreIssue(report) {
     evidence: [
       `Core: \`${report.corePath}\` (sha256 \`${crash.coreSha256}\`)`,
       `Binary: \`${report.binaryPath}\` (sha256 \`${report.layout.binarySha256}\`, ${report.layout.imageType})`,
-      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\`${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
+      `REA evidence: crash \`${crash.evidenceId}\`, layout ${report.layout.evidenceId === null ? "read from the ELF headers by crashlens" : `\`${report.layout.evidenceId}\``}${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
       `gdb: ${report.gdb.status}${report.gdb.reason === void 0 ? "" : ` (${report.gdb.reason})`}`,
       ...report.layout.mitigations === null ? [] : [
         `Build hardening (static, inferred): ${mitigations(report.layout.mitigations)}`
@@ -497,7 +652,7 @@ function toCoreIssue(report) {
 }
 function summary(report, whereName) {
   const { classification } = report;
-  const inLibrary = report.firstOwnFrame !== null && report.frames[0] !== void 0 ? ` The crash happened inside \`${frameName(report.frames[0])}\`, called from \`${whereName}\` in your binary.` : "";
+  const inLibrary = classification.kind === "null-function-call" ? report.nullCall == null ? "" : ` The indirect call \`${report.nullCall.trace.callText}\` at \`${hex(report.nullCall.trace.callAddress)}\` in \`${report.nullCall.caller}\` jumped to address 0.` : report.firstOwnFrame !== null && report.frames[0] !== void 0 ? ` The crash happened inside \`${frameName(report.frames[0])}\`, called from \`${whereName}\` in your binary.` : "";
   return `\`${report.program}\` crashed with **${classification.signalName}**: ${classification.title.toLowerCase()} at \`${whereName}\`.${inLibrary} ${classification.explanation}`;
 }
 function frameName(frame2) {
@@ -639,15 +794,15 @@ function parseRust(text) {
         if (!RUST_AT.test(lines[index] ?? "")) break;
         continue;
       }
-      const at = RUST_AT.exec(lines[index + 1] ?? "");
+      const at2 = RUST_AT.exec(lines[index + 1] ?? "");
       const fn = normalizeRustSymbol(symbol[1] ?? "");
-      const frameFile = at?.[1] ?? null;
+      const frameFile = at2?.[1] ?? null;
       frames.push(
         frame({
           function: fn,
           file: frameFile,
-          line: at ? Number(at[2]) : null,
-          column: at?.[3] === void 0 ? null : Number(at[3]),
+          line: at2 ? Number(at2[2]) : null,
+          column: at2?.[3] === void 0 ? null : Number(at2[3]),
           own: isOwnRustFrame(fn, frameFile)
         })
       );
@@ -709,9 +864,9 @@ function parseJava(text) {
       if (/^\s/.test(line)) continue;
       suppressed = false;
     }
-    const at = FRAME.exec(line);
-    if (at !== null) {
-      current.frames.push(javaFrame(at[1] ?? "", at[2] ?? ""));
+    const at2 = FRAME.exec(line);
+    if (at2 !== null) {
+      current.frames.push(javaFrame(at2[1] ?? "", at2[2] ?? ""));
       continue;
     }
     const more = MORE.exec(line);
@@ -930,7 +1085,7 @@ function parsePytest(text) {
     if (FRAME_SEPARATOR.test(line)) blocks.push([]);
     else blocks[blocks.length - 1].push(line);
   }
-  const split = blocks.flatMap((block) => {
+  const split2 = blocks.flatMap((block) => {
     const starts = block.flatMap((line, i) => LOCATION.exec(line)?.[3] !== void 0 ? [i] : []);
     if (starts.length < 2) return [block];
     return starts.map((start, n) => block.slice(n === 0 ? 0 : start, starts[n + 1] ?? block.length));
@@ -938,13 +1093,13 @@ function parsePytest(text) {
   const frames = [];
   let errorType = null;
   let message = "";
-  for (const block of split) {
-    const at = block.map((line) => LOCATION.exec(line)).find((m) => m !== null);
-    if (at === void 0 || at === null) continue;
-    const file = at[1];
-    const name = at[3] ?? /^\s*(?:async\s+)?def (\w+)\(/m.exec(block.join("\n"))?.[1] ?? "?";
+  for (const block of split2) {
+    const at2 = block.map((line) => LOCATION.exec(line)).find((m) => m !== null);
+    if (at2 === void 0 || at2 === null) continue;
+    const file = at2[1];
+    const name = at2[3] ?? /^\s*(?:async\s+)?def (\w+)\(/m.exec(block.join("\n"))?.[1] ?? "?";
     const marked = block.find((line) => line.startsWith(">"));
-    const short = block.indexOf(at[0]);
+    const short = block.indexOf(at2[0]);
     const code2 = marked !== void 0 ? marked.slice(1).trim() : (block[short + 1] ?? "").trim() || null;
     const locals = {};
     for (const line of block) {
@@ -966,7 +1121,7 @@ function parsePytest(text) {
       frame({
         function: name,
         file,
-        line: Number(at[2]),
+        line: Number(at2[2]),
         own: isOwnPythonFile(file),
         code: code2,
         ...Object.keys(locals).length === 0 ? {} : { locals }
@@ -1149,7 +1304,7 @@ function lineStart(text, index) {
 }
 
 // src/failureIssue.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 
 // src/rules.ts
 var NIL_STEPS = [
@@ -1854,7 +2009,7 @@ function toFailureIssue(failure2, input, text) {
     confidence: classification.confidence,
     warnings: warnings(failure2, own.length),
     evidence: [
-      `Input: \`${input}\` (sha256 \`${createHash("sha256").update(text).digest("hex")}\`)`,
+      `Input: \`${input}\` (sha256 \`${createHash2("sha256").update(text).digest("hex")}\`)`,
       `Parsed as ${language} ${failure2.header} output; ${failure2.frames.length} frame${failure2.frames.length === 1 ? "" : "s"}, ${own.length} in your code.`
     ],
     limitations: [
@@ -1904,8 +2059,8 @@ function stackLines(frames) {
   const lines = shown.flatMap(([f, index]) => {
     const marker = f.own && !f.createdBy ? "\u2192" : " ";
     const name = f.createdBy ? `created by ${f.function}` : f.function;
-    const at = f.file === null ? "" : `  at ${f.file}:${f.line}${f.column === null ? "" : `:${f.column}`}`;
-    const line = `${marker} #${index} ${name}${at}`;
+    const at2 = f.file === null ? "" : `  at ${f.file}:${f.line}${f.column === null ? "" : `:${f.column}`}`;
+    const line = `${marker} #${index} ${name}${at2}`;
     return f.code === null ? [line] : [line, `       ${f.code}`];
   });
   return hidden <= 1 ? lines : [...lines, `  \u2026 ${hidden} more frames in runtime or library code`];
@@ -1928,7 +2083,7 @@ function locations(failure2) {
 function signature(failure2, kind, own) {
   const qualified = failure2.language === "go" || failure2.language === "rust" || failure2.language === "java";
   const parts = own.length > 0 ? own.slice(0, 3).map((f) => qualified || f.file === null ? f.function : `${basename2(f.file)}:${f.function}`) : failure2.location !== null ? [`${basename2(failure2.location.file)}:${failure2.location.line}`] : [];
-  return createHash("sha256").update([kind, ...parts].join("|")).digest("hex").slice(0, 12);
+  return createHash2("sha256").update([kind, ...parts].join("|")).digest("hex").slice(0, 12);
 }
 function lowerFirst(text) {
   return /^[A-Z][a-z]/.test(text) ? text.charAt(0).toLowerCase() + text.slice(1) : text;
@@ -2035,7 +2190,7 @@ function toJson(value, omit = []) {
 }
 
 // src/triage.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { basename as basename3 } from "node:path";
 
 // src/classify.ts
@@ -2157,6 +2312,18 @@ function classifySegv(signal, signalName, pc, sp) {
       ],
       confidence: "medium"
     };
+  if (address !== null && signal.code === 1 && address < NULL_PAGE_LIMIT && pc === address)
+    return {
+      kind: "null-function-call",
+      title: "Call through a NULL function pointer",
+      signalName,
+      explanation: address === 0n ? "The program called address 0x0: a function pointer, callback or table entry it called was NULL. The faulting frame has no code; the caller holds the indirect call." : `The program jumped to ${hex(address)}, a small offset from NULL: most likely a function pointer read from a table or object that was NULL.`,
+      nextSteps: [
+        "Look at the indirect call in the caller frame and find where its target register was loaded.",
+        "Decide whether that slot should always be set (a missing entry where it is filled in) or may be empty (the caller must check it)."
+      ],
+      confidence: "high"
+    };
   if (address !== null && signal.code === 1 && address < NULL_PAGE_LIMIT)
     return {
       kind: "null-pointer-dereference",
@@ -2262,7 +2429,7 @@ import { execFile } from "node:child_process";
 var OBJDUMP_TIMEOUT_MS = 3e4;
 var BEFORE = 16;
 var AFTER = 4;
-function disassembleAround(binaryPath, start, end, target, objdump = "objdump") {
+function disassembleFunction(binaryPath, start, end, objdump = "objdump") {
   const args = [
     "-d",
     "--no-show-raw-insn",
@@ -2278,7 +2445,24 @@ function disassembleAround(binaryPath, start, end, target, objdump = "objdump") 
         resolve3(null);
         return;
       }
-      resolve3(windowAround(parseObjdump(stdout), target));
+      resolve3(parseObjdump(stdout));
+    });
+  });
+}
+function sourceLines(binaryPath, addresses, addr2line = "addr2line") {
+  if (addresses.length === 0) return Promise.resolve(/* @__PURE__ */ new Map());
+  const args = ["-e", binaryPath, ...addresses.map((address) => `0x${address.toString(16)}`)];
+  return new Promise((resolve3) => {
+    execFile(addr2line, args, { timeout: OBJDUMP_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      const lines = /* @__PURE__ */ new Map();
+      if (!error)
+        stdout.split("\n").forEach((line, i) => {
+          const address = addresses[i];
+          const match = /^(.+):(\d+)(?: \(discriminator \d+\))?$/.exec(line.trim());
+          if (address === void 0 || match === null || match[1] === "??" || match[2] === "0") return;
+          lines.set(address, `${match[1].split("../").pop()}:${match[2]}`);
+        });
+      resolve3(lines);
     });
   });
 }
@@ -2419,6 +2603,202 @@ function parseInstruction(line) {
       text: line.trim().replace(/^=>\s*/, "")
     }
   ];
+}
+
+// src/nullCall.ts
+var ALIASES = {
+  eax: "rax",
+  ax: "rax",
+  al: "rax",
+  ebx: "rbx",
+  bx: "rbx",
+  bl: "rbx",
+  ecx: "rcx",
+  cx: "rcx",
+  cl: "rcx",
+  edx: "rdx",
+  dx: "rdx",
+  dl: "rdx",
+  esi: "rsi",
+  si: "rsi",
+  sil: "rsi",
+  edi: "rdi",
+  di: "rdi",
+  dil: "rdi",
+  ebp: "rbp",
+  bp: "rbp",
+  bpl: "rbp"
+};
+var CLOBBERED_BY_CALL = /* @__PURE__ */ new Set(["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]);
+var MAX_STEPS = 5e3;
+var CHECK_REACH = 4;
+function reg(name) {
+  const bare = name.replace(/^%/, "");
+  return ALIASES[bare] ?? bare.replace(/^(r\d{1,2})[dwb]$/, "$1");
+}
+function split(text) {
+  const space = text.indexOf(" ");
+  if (space === -1) return { mnemonic: text, operands: [] };
+  const operands = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of text.slice(space + 1)) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      operands.push(current.trim());
+      current = "";
+    } else current += ch;
+  }
+  if (current.trim() !== "") operands.push(current.trim());
+  return { mnemonic: text.slice(0, space).replace(/^(bnd|notrack) /, ""), operands };
+}
+function memoryOperand(operand) {
+  const match = /^(-?0x[0-9a-f]+|-?\d+)?\(%([a-z0-9]+)\)$/.exec(operand);
+  if (match === null || match[2] === "rip") return null;
+  const raw = match[1] ?? "0";
+  const negative = raw.startsWith("-");
+  const magnitude = BigInt(negative ? raw.slice(1) : raw);
+  return { base: reg(match[2]), offset: negative ? -magnitude : magnitude };
+}
+function jumpTarget(text) {
+  const { mnemonic, operands } = split(text);
+  if (!/^j[a-z]+$/.test(mnemonic) || operands.length !== 1) return null;
+  const match = /^(?:0x)?([0-9a-f]+)$/.exec(operands[0]);
+  return match === null ? null : BigInt(`0x${match[1]}`);
+}
+var isUnconditional = (mnemonic) => mnemonic === "jmp" || mnemonic === "ret" || mnemonic === "ud2" || mnemonic === "hlt";
+function written(text) {
+  const { mnemonic, operands } = split(text);
+  if (/^(test|cmp|push|j[a-z]+|nop[a-z]*|xchg|ret|endbr64)$/.test(mnemonic) || mnemonic.startsWith("cmp")) return null;
+  const last = operands[operands.length - 1];
+  return last !== void 0 && last.startsWith("%") ? reg(last) : null;
+}
+function nullTest(lines, index) {
+  const jcc = split(lines[index].text).mnemonic;
+  const previous = lines[index - 1];
+  if (previous === void 0) return null;
+  const { mnemonic, operands } = split(previous.text);
+  if (mnemonic !== "test" || operands.length !== 2 || operands[0] !== operands[1]) return null;
+  const register2 = reg(operands[0]);
+  if (jcc === "je" || jcc === "jz") return { register: register2, takenMeansNull: true };
+  if (jcc === "jne" || jcc === "jnz") return { register: register2, takenMeansNull: false };
+  return null;
+}
+function predecessors(lines, index, jumpsTo) {
+  const edges = [];
+  const before = lines[index - 1];
+  if (before !== void 0 && !isUnconditional(split(before.text).mnemonic)) edges.push({ from: index - 1, taken: false });
+  for (const from of jumpsTo.get(lines[index].address) ?? []) edges.push({ from, taken: true });
+  return edges;
+}
+function checkedSlot(lines, edge) {
+  const jump = lines[edge.from];
+  if (jump === void 0 || jumpTarget(jump.text) === null) return null;
+  const test = nullTest(lines, edge.from);
+  if (test === null || test.takenMeansNull !== edge.taken) return null;
+  for (let i = edge.from - 2; i >= Math.max(0, edge.from - 2 - CHECK_REACH); i--) {
+    const line = lines[i];
+    if (written(line.text) !== test.register) continue;
+    const { mnemonic, operands } = split(line.text);
+    const memory = mnemonic === "mov" && operands.length === 2 ? memoryOperand(operands[0]) : null;
+    return memory === null ? null : { address: line.address, text: line.text, ...memory };
+  }
+  return null;
+}
+function checksLeadingTo(lines, index, jumpsTo) {
+  const found = [];
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (at2, depth) => {
+    if (seen.has(at2) || depth > 3) return;
+    seen.add(at2);
+    for (const edge of predecessors(lines, at2, jumpsTo)) {
+      const slot = checkedSlot(lines, edge);
+      if (slot !== null) found.push(slot);
+      else if (!edge.taken && /^nop/.test(split(lines[edge.from].text).mnemonic)) visit(edge.from, depth + 1);
+    }
+  };
+  visit(index, 0);
+  return found;
+}
+function traceNullCall(lines, returnAddress) {
+  const callIndex = lines.findIndex((line, i) => line.address < returnAddress && (lines[i + 1]?.address ?? returnAddress) >= returnAddress);
+  const call = lines[callIndex];
+  if (call === void 0) return null;
+  const { mnemonic, operands } = split(call.text);
+  if (mnemonic !== "call" || operands.length !== 1 || !operands[0].startsWith("*")) return null;
+  const target = operands[0].slice(1);
+  if (!target.startsWith("%")) {
+    const memory = memoryOperand(target);
+    return {
+      callAddress: call.address,
+      callText: call.text,
+      register: null,
+      slot: memory === null ? null : { address: call.address, text: call.text, ...memory },
+      guardedPaths: 0,
+      sources: []
+    };
+  }
+  const jumpsTo = /* @__PURE__ */ new Map();
+  lines.forEach((line, i) => {
+    const to = jumpTarget(line.text);
+    if (to !== null) jumpsTo.set(to, [...jumpsTo.get(to) ?? [], i]);
+  });
+  const register2 = reg(target);
+  const sources = /* @__PURE__ */ new Map();
+  const guarded = /* @__PURE__ */ new Set();
+  let steps = 0;
+  const stack = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (at2, changed) => {
+    for (const edge of predecessors(lines, at2, jumpsTo)) {
+      const test = jumpTarget(lines[edge.from].text) === null ? null : nullTest(lines, edge.from);
+      if (test !== null && test.register === register2 && !changed.has(register2) && test.takenMeansNull !== edge.taken) {
+        guarded.add(`${edge.from}>${at2}`);
+        continue;
+      }
+      stack.push({ index: edge.from, changed });
+    }
+  };
+  push(callIndex, /* @__PURE__ */ new Set());
+  while (stack.length > 0 && steps++ < MAX_STEPS) {
+    const { index, changed } = stack.pop();
+    const key = `${index}|${[...changed].sort().join(",")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const line = lines[index];
+    const parts = split(line.text);
+    if (parts.mnemonic === "call" && CLOBBERED_BY_CALL.has(register2)) {
+      sources.set(index, { kind: register2 === "rax" ? "call-result" : "other", address: line.address, text: line.text });
+      continue;
+    }
+    const writes = written(line.text);
+    if (writes !== register2) {
+      push(index, writes === null ? changed : /* @__PURE__ */ new Set([...changed, writes]));
+      continue;
+    }
+    const memory = parts.mnemonic === "mov" && parts.operands.length === 2 ? memoryOperand(parts.operands[0]) : null;
+    const zero = parts.mnemonic === "xor" && parts.operands[0] === parts.operands[1] || parts.mnemonic === "mov" && /^\$0x0$|^\$0$/.test(parts.operands[0] ?? "");
+    sources.set(
+      index,
+      memory !== null ? {
+        kind: "load",
+        address: line.address,
+        text: line.text,
+        ...memory,
+        baseChanged: changed.has(memory.base),
+        reachedWhenNull: checksLeadingTo(lines, index, jumpsTo)
+      } : { kind: zero ? "zero" : "other", address: line.address, text: line.text }
+    );
+  }
+  return {
+    callAddress: call.address,
+    callText: call.text,
+    register: register2,
+    slot: null,
+    guardedPaths: guarded.size,
+    sources: [...sources.values()].sort((a, b) => a.address < b.address ? -1 : 1)
+  };
 }
 
 // src/ntFile.ts
@@ -2667,11 +3047,30 @@ async function triage(options) {
     }) : inspectWithGdb(options.binaryPath, options.corePath, options.gdb)
   ]);
   if (!crash.ok) return crash;
-  if (!layout.ok) return layout;
+  const binary = layout.ok ? layout.value : await layoutFromElf(options.binaryPath, layoutFailure(layout.error));
+  if (binary === null) return layout;
   const facts = await readFileFacts(options, crash.value);
-  const report = buildReport(options, crash.value, layout.value, gdb, facts);
+  const report = buildReport(options, crash.value, binary, gdb, facts);
   if (!report.ok) return report;
-  return ok(await explainFocus(options, report.value));
+  return ok(await explainFocus(options, report.value, facts));
+}
+function layoutFailure(error) {
+  const detail = error.detail;
+  const reason = detail?.details?.reason;
+  return typeof reason === "string" ? `REA inspect-binary-layout failed: ${reason}` : error.message;
+}
+async function layoutFromElf(binaryPath, reason) {
+  const elf = await elfLayout(binaryPath).catch(() => null);
+  if (elf === null) return null;
+  return {
+    evidenceId: null,
+    binarySha256: elf.sha256,
+    imageType: elf.imageType,
+    loadSegments: elf.loadSegments,
+    functions: elf.functions,
+    mitigations: null,
+    fallbackReason: reason
+  };
 }
 async function readFileFacts(options, crash) {
   const quiet = (promise, fallback2) => promise.catch(() => fallback2);
@@ -2693,10 +3092,12 @@ async function readFileFacts(options, crash) {
   const status = binary === null || core === null ? "unknown" : binary === core ? "match" : "mismatch";
   return { unwindRanges, buildId: { binary, core, status } };
 }
-async function explainFocus(options, report) {
+async function explainFocus(options, report, facts = NO_FILE_FACTS) {
   const focus = report.focus;
   if (focus === null) return report;
-  const disassembly = await disassembleAround(options.binaryPath, focus.start, focus.end, focus.target).catch(() => null);
+  const lines = await disassembleFunction(options.binaryPath, focus.start, focus.end).catch(() => null);
+  const disassembly = lines === null ? null : windowAround(lines, focus.target);
+  const nullCall = report.classification.kind === "null-function-call" && focus.reason === "caller" && lines !== null ? await readNullCall(options, report, facts, focus, lines).catch(() => null) : null;
   const decompiled = [];
   const warnings2 = [...report.warnings];
   const auto = (options.decompile ?? "auto") === "auto";
@@ -2719,7 +3120,47 @@ async function explainFocus(options, report) {
       break;
     }
   }
-  return { ...report, disassembly, decompiled, warnings: warnings2 };
+  if (nullCall === null) return { ...report, disassembly, decompiled, warnings: warnings2 };
+  const names = /* @__PURE__ */ new Set([nullCall.trace.register, ...nullCall.slots.map((reading) => reading.slot.base)]);
+  const relevantRegisters2 = report.crash.registers.filter((entry) => names.has(entry.name));
+  return { ...report, disassembly, decompiled, warnings: warnings2, nullCall, relevantRegisters: relevantRegisters2 };
+}
+var BUILT_IN_SECTIONS = /^\.(rodata|data\.rel\.ro)/;
+var STACK_REACH = 8n << 20n;
+async function readNullCall(options, report, facts, focus, lines) {
+  const trace = traceNullCall(lines, focus.target + 1n);
+  if (trace === null) return null;
+  const mappings = report.crash.ntFileDescriptor === null ? null : parseNtFile(report.crash.ntFileDescriptor);
+  if (mappings === null || !mappings.ok) return null;
+  const symbolizer = createSymbolizer(options.binaryPath, mappings.mappings, report.layout, facts.unwindRanges, facts.mappedName);
+  const sp = register(report.crash, "rsp");
+  const read = async (slot, role, baseChanged = false) => {
+    const base = baseChanged ? null : register(report.crash, slot.base);
+    if (base === null) return { slot, role, baseValue: null, value: null, region: null, builtIn: false, line: null };
+    const address = BigInt.asUintN(64, base + slot.offset);
+    const bytes = await readCoreBytes(options.corePath, address, 8).catch(() => null);
+    const where = symbolizer.locate(base);
+    let region = null;
+    let builtIn = false;
+    if (where.kind === "binary" || where.kind === "binary-function") {
+      const place = await describeLinkedAddress(options.binaryPath, where.moduleOffset).catch(() => null);
+      builtIn = place?.section != null && BUILT_IN_SECTIONS.test(place.section);
+      region = `the binary's ${place?.section ?? "image"} at link address ${hex(where.moduleOffset)}${place?.symbol == null ? "" : ` (\`${place.symbol.name}${place.symbol.offset === 0n ? "" : `+${hex(place.symbol.offset)}`}\`${place.symbol.file === null ? "" : ` from ${place.symbol.file}`})`}`;
+    } else if (where.kind === "other-module") region = `\`${where.module}\`+${hex(where.moduleOffset)}`;
+    else if (sp !== null && base <= sp + STACK_REACH && base + STACK_REACH >= sp) region = "the stack";
+    else if (where.kind === "unmapped") region = "memory not backed by a file (heap or mmap)";
+    return { slot, role, baseValue: base, value: bytes === null ? null : bytes.readBigUInt64LE(0), region, builtIn, line: null };
+  };
+  const slots = [];
+  if (trace.slot !== null) slots.push(await read(trace.slot, "target"));
+  for (const source of trace.sources) {
+    if (source.kind !== "load") continue;
+    slots.push(await read(source, "target", source.baseChanged));
+    for (const check of source.reachedWhenNull)
+      if (!slots.some((s) => s.slot.base === check.base && s.slot.offset === check.offset)) slots.push(await read(check, "check"));
+  }
+  const lineOf = await sourceLines(options.binaryPath, slots.map((reading) => reading.slot.address)).catch(() => /* @__PURE__ */ new Map());
+  return { caller: focus.name, trace, slots: slots.map((reading) => ({ ...reading, line: lineOf.get(reading.slot.address) ?? null })) };
 }
 function buildReport(options, crash, layout, gdb, facts = NO_FILE_FACTS) {
   if (crash.ntFileDescriptor === null)
@@ -2787,11 +3228,13 @@ function buildReport(options, crash, layout, gdb, facts = NO_FILE_FACTS) {
     focus: focusFunction(faultLocation, firstOwnFrame, facts.unwindRanges),
     disassembly: null,
     decompiled: [],
+    nullCall: null,
     gdb: gdb.status === "ok" ? { status: "ok" } : { status: gdb.status, reason: gdb.reason },
     warnings: warnings2,
     limitations: [
       "The program was not executed; all facts come from the recorded core and the binary on disk.",
       buildId.status === "match" ? "The binary's GNU build ID matches the image recorded in the core." : buildId.status === "mismatch" ? "The binary's GNU build ID differs from the image recorded in the core, so this report likely describes the wrong build." : "The binary is matched to the core by file name only (no build ID in one of them, or the core did not record the binary's headers). Rebuilt binaries give wrong function names.",
+      ...layout.fallbackReason === void 0 ? [] : [`Segments and symbols were read by crashlens from the binary's ELF headers because ${layout.fallbackReason.replace(/\.$/, "")}. No build-hardening facts.`],
       ...frames.some((frame2) => frame2.location.kind === "binary-function" && frame2.location.symbol.origin === "eh_frame") ? ["sub_<address> names mark functions found in the binary's .eh_frame unwind tables because it has no symbol table entry for them."] : [],
       ...gdb.status === "ok" ? [
         "Backtrace frames beyond #0 come from gdb unwinding and may be incomplete without debug info or frame pointers."
@@ -2883,7 +3326,7 @@ function signature2(classification, frames) {
     if (location.kind === "unmapped" || location.kind === "unknown") return "?";
     return `${location.module}+0x${location.moduleOffset.toString(16)}`;
   });
-  return createHash2("sha256").update([classification.kind, ...parts].join("|")).digest("hex").slice(0, 12);
+  return createHash3("sha256").update([classification.kind, ...parts].join("|")).digest("hex").slice(0, 12);
 }
 
 // src/analyze.ts
@@ -3181,7 +3624,7 @@ async function traceJava(message, frames, root, allFiles) {
   const files = new Files(root);
   const lines = await files.lines(crash.file);
   if (lines === null || lines[crash.line - 1] === void 0) return null;
-  const at = (file, index2) => c(`${relative2(root, file)}:${index2 + 1}`);
+  const at2 = (file, index2) => c(`${relative2(root, file)}:${index2 + 1}`);
   const hypotheses = [];
   const steps = [];
   const code2 = [];
@@ -3200,7 +3643,7 @@ async function traceJava(message, frames, root, allFiles) {
     if (name2 === null) return null;
     const call = callOn(lines[crash.line - 1], name2[1]);
     if (call === null) return null;
-    steps.push(`The null is the return value of ${c(call.text)} at ${at(crash.file, crash.line - 1)}.`);
+    steps.push(`The null is the return value of ${c(call.text)} at ${at2(crash.file, crash.line - 1)}.`);
     await explainCall(call.text, crash.file, crash.line - 1, crashMethod, arity(name2[2]));
     return result();
   }
@@ -3216,7 +3659,7 @@ async function traceJava(message, frames, root, allFiles) {
       const type = local ?? owner.slice(owner.lastIndexOf(".") + 1);
       classFile = /^[A-Z]/.test(type) ? await classFor(type, crash.file, allFiles) : null;
     }
-    steps.push(`The null is the field ${c(culprit)} at ${at(crash.file, crash.line - 1)}.`);
+    steps.push(`The null is the field ${c(culprit)} at ${at2(crash.file, crash.line - 1)}.`);
     if (classFile !== null) await explainField(classFile, fieldName);
     return result();
   }
@@ -3229,15 +3672,15 @@ async function traceJava(message, frames, root, allFiles) {
     name = resolved;
     steps.push(`${c(culprit)} in the message is the local variable ${c(name)} (slot ${slot[1]}; the class was compiled without \`-g\`, so the JVM only knows the slot).`);
   }
-  steps.push(`The null is ${c(name)} at ${at(crash.file, crash.line - 1)}.`);
+  steps.push(`The null is ${c(name)} at ${at2(crash.file, crash.line - 1)}.`);
   let method = crashMethod;
   let index = crash.line - 1;
   for (let hop = 0, f = 0; hop < MAX_HOPS; hop++) {
     const assigned = await assignmentBefore(files, method, index, name);
     if (assigned !== null) {
-      steps.push(`${c(name)} is assigned ${c(assigned.expr)} at ${at(method.file, assigned.index)}.`);
+      steps.push(`${c(name)} is assigned ${c(assigned.expr)} at ${at2(method.file, assigned.index)}.`);
       if (/^\s*null\s*$/.test(assigned.expr)) {
-        hypotheses.push(`**Assigned null.** ${c(name)} is set to \`null\` at ${at(method.file, assigned.index)} and not reassigned before ${at(crash.file, crash.line - 1)}.`);
+        hypotheses.push(`**Assigned null.** ${c(name)} is set to \`null\` at ${at2(method.file, assigned.index)} and not reassigned before ${at2(crash.file, crash.line - 1)}.`);
         return result();
       }
       const simple2 = new RegExp(`^(${ID})$`).exec(assigned.expr);
@@ -3263,7 +3706,7 @@ async function traceJava(message, frames, root, allFiles) {
     const arg = args?.[param];
     const callerMethod = await methodAt(files, caller.file, caller.line - 1, shortName(caller.function));
     if (arg === void 0 || callerMethod === null) return result();
-    steps.push(`${c(name)} is a parameter of ${c(method.name)}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
+    steps.push(`${c(name)} is a parameter of ${c(method.name)}, passed as ${c(arg)} at ${at2(caller.file, caller.line - 1)}.`);
     f++;
     method = callerMethod;
     index = caller.line - 1;
@@ -3304,9 +3747,9 @@ async function traceJava(message, frames, root, allFiles) {
       if (ret === null) continue;
       const value = ret[1].trim();
       if (value === "null") {
-        steps.push(`${c(`${def.name}(...)`)} returns \`null\` at ${at(def.file, i)}.`);
+        steps.push(`${c(`${def.name}(...)`)} returns \`null\` at ${at2(def.file, i)}.`);
         hypotheses.push(
-          `**The method returns null on purpose.** ${c(def.name)} returns \`null\` at ${at(def.file, i)}, and ${at(file, index2)} uses the result without checking it. Find out which case reached that return before guarding the crash site.`
+          `**The method returns null on purpose.** ${c(def.name)} returns \`null\` at ${at2(def.file, i)}, and ${at2(file, index2)} uses the result without checking it. Find out which case reached that return before guarding the crash site.`
         );
         return;
       }
@@ -3314,7 +3757,7 @@ async function traceJava(message, frames, root, allFiles) {
       if (inner === null) continue;
       const innerArgs = callArgs(value, inner[2]) ?? [];
       if (innerArgs.length !== 1) continue;
-      steps.push(`${c(`${def.name}(...)`)} returns ${c(value)} at ${at(def.file, i)}.`);
+      steps.push(`${c(`${def.name}(...)`)} returns ${c(value)} at ${at2(def.file, i)}.`);
       const keyParam = def.params.findIndex((p) => p.name === innerArgs[0]);
       const lookup = {
         map: inner[1],
@@ -3333,7 +3776,7 @@ async function traceJava(message, frames, root, allFiles) {
     const mapName = lookup.map.replace(/^this\./, "");
     const mapType = await declaredType(files, lookup.classFile, mapName, lookup.method, lookup.index);
     const keyType = passed?.param.type ?? (lookup.method === null ? null : await typeOf(files, lookup.key, lookup.method, lookup.index));
-    const at2 = at(lookup.file, lookup.index);
+    const at22 = at2(lookup.file, lookup.index);
     if (how === "getProperty") {
       const literal = /^"([^"\\]+)"$/.exec(passed?.arg ?? lookup.key)?.[1];
       if (literal === void 0) return false;
@@ -3342,10 +3785,10 @@ async function traceJava(message, frames, root, allFiles) {
       const keys = props.flatMap((p) => p.keys.map((k) => ({ ...k, file: p.file })));
       if (keys.some((k) => k.key === literal)) return false;
       const near = keys.filter((k) => similarKey(k.key, literal)).slice(0, 3);
-      const where = passed === null ? at2 : at(passed.file, passed.index);
+      const where = passed === null ? at22 : at2(passed.file, passed.index);
       const fileList = [...new Set(props.map((p) => c(relative2(root, p.file))))].join(", ");
       hypotheses.push(
-        near.length > 0 ? `**Property key not in the file.** ${where} reads ${c(literal)}, but ${fileList} has no such key; it has ${near.map((k) => `${c(k.key)} (${at(k.file, k.index)})`).join(", ")}. \`getProperty\` returns \`null\` for a missing key: fix the name on one side rather than defaulting it.` : `**Property key not in the file.** ${where} reads ${c(literal)}, which ${fileList} does not set, so \`getProperty\` returns \`null\`. Add the key or fix its name before defaulting it.`
+        near.length > 0 ? `**Property key not in the file.** ${where} reads ${c(literal)}, but ${fileList} has no such key; it has ${near.map((k) => `${c(k.key)} (${at2(k.file, k.index)})`).join(", ")}. \`getProperty\` returns \`null\` for a missing key: fix the name on one side rather than defaulting it.` : `**Property key not in the file.** ${where} reads ${c(literal)}, which ${fileList} does not set, so \`getProperty\` returns \`null\`. Add the key or fix its name before defaulting it.`
       );
       return true;
     }
@@ -3353,13 +3796,13 @@ async function traceJava(message, frames, root, allFiles) {
     if (generics === null) return false;
     const [mapKey] = splitTopLevel(generics[1], true).map((t) => t.trim());
     if (mapKey === void 0) return false;
-    steps.push(`${c(lookup.map)} is a ${c(mapType)}; ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} returns \`null\` when no entry matches.`);
+    steps.push(`${c(lookup.map)} is a ${c(mapType)}; ${c(`${lookup.map}.get(${lookup.key})`)} at ${at22} returns \`null\` when no entry matches.`);
     const keyBase = keyType?.replace(/^final\s+/, "").trim() ?? null;
     const boxedKey = keyBase === null ? null : BOXED[keyBase] ?? keyBase;
     const numeric = /* @__PURE__ */ new Set(["Integer", "Long", "Short", "Byte", "Double", "Float", "Character"]);
     if (boxedKey !== null && numeric.has(boxedKey) && numeric.has(mapKey) && boxedKey !== mapKey) {
       hypotheses.push(
-        `**Map key type differs.** ${c(lookup.map)} is a ${c(mapType)}, but ${c(lookup.key)} at ${at2} is ${/^[aeiouAEIOU]/.test(keyBase) ? "an" : "a"} ${c(keyBase)}${keyBase === boxedKey ? "" : `, boxed to ${c(boxedKey)}`}. \`Map.get\` takes any \`Object\`, and an ${c(boxedKey)} never equals a ${c(mapKey)}, so this lookup always returns \`null\`. Use a ${c(mapKey === "Long" ? "long" : mapKey)} key.`
+        `**Map key type differs.** ${c(lookup.map)} is a ${c(mapType)}, but ${c(lookup.key)} at ${at22} is ${/^[aeiouAEIOU]/.test(keyBase) ? "an" : "a"} ${c(keyBase)}${keyBase === boxedKey ? "" : `, boxed to ${c(boxedKey)}`}. \`Map.get\` takes any \`Object\`, and an ${c(boxedKey)} never equals a ${c(mapKey)}, so this lookup always returns \`null\`. Use a ${c(mapKey === "Long" ? "long" : mapKey)} key.`
       );
       return true;
     }
@@ -3374,12 +3817,12 @@ async function traceJava(message, frames, root, allFiles) {
       const fn = transform[0].replace(/^\./, "").replace(/\s*\($/, "");
       if (passed?.arg != null && NORMALIZE.test(passed.arg)) continue;
       hypotheses.push(
-        `**Key normalized on write, not on read.** ${at(lookup.classFile, i)} stores entries under ${c(stored)}, but ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} looks up the key as given, without ${c(`${fn}()`)}. A key that differs only in ${/Case/.test(fn) ? "case" : "spacing or form"} finds nothing. Apply the same ${c(fn)} on lookup.`
+        `**Key normalized on write, not on read.** ${at2(lookup.classFile, i)} stores entries under ${c(stored)}, but ${c(`${lookup.map}.get(${lookup.key})`)} at ${at22} looks up the key as given, without ${c(`${fn}()`)}. A key that differs only in ${/Case/.test(fn) ? "case" : "spacing or form"} finds nothing. Apply the same ${c(fn)} on lookup.`
       );
       return true;
     }
     hypotheses.push(
-      `**The lookup found nothing.** ${c(`${lookup.map}.get(${lookup.key})`)} at ${at2} returns \`null\` when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
+      `**The lookup found nothing.** ${c(`${lookup.map}.get(${lookup.key})`)} at ${at22} returns \`null\` when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
     );
     return true;
   }
@@ -3387,7 +3830,7 @@ async function traceJava(message, frames, root, allFiles) {
     const classLines = (await files.lines(classFile) ?? []).slice(0, MAX_CLASS_LINES);
     const decl = fieldDeclaration(classLines, fieldName);
     if (decl === null) return;
-    steps.push(`${c(fieldName)} is declared at ${at(classFile, decl.index)}: ${c(classLines[decl.index].trim())}`);
+    steps.push(`${c(fieldName)} is declared at ${at2(classFile, decl.index)}: ${c(classLines[decl.index].trim())}`);
     const annotated = INJECTED.test(classLines.slice(Math.max(0, decl.index - 3), decl.index + 1).join("\n")) || INJECTED.test(classLines.slice(0, decl.classStart + 1).join("\n"));
     const self = new RegExp(`^\\s*${escape(fieldName)}\\s*=\\s*${escape(fieldName)}\\s*;`);
     const write = new RegExp(`(?:\\bthis\\s*\\.\\s*|(?<![\\w$.])(?:${ID}\\s*\\.\\s*)?)${escape(fieldName)}\\s*=(?!=)`);
@@ -3401,19 +3844,19 @@ async function traceJava(message, frames, root, allFiles) {
     }
     if (selfAt !== -1 && writes.length === 0) {
       hypotheses.push(
-        `**The field is assigned to itself.** ${at(classFile, selfAt)} reads ${c(classLines[selfAt].trim())}: the parameter ${c(fieldName)} hides the field, so this assigns the parameter to itself and the field stays \`null\`. Write ${c(`this.${fieldName} = ${fieldName};`)}.`
+        `**The field is assigned to itself.** ${at2(classFile, selfAt)} reads ${c(classLines[selfAt].trim())}: the parameter ${c(fieldName)} hides the field, so this assigns the parameter to itself and the field stays \`null\`. Write ${c(`this.${fieldName} = ${fieldName};`)}.`
       );
       return;
     }
     if (annotated || decl.initialized || !decl.private) return;
     if (writes.length === 0) {
       hypotheses.push(
-        `**The field is never assigned.** ${c(fieldName)} is declared at ${at(classFile, decl.index)} with no initializer, and nothing in ${c(basename4(classFile))} assigns it, so it is always \`null\`. Set it in the constructor.`
+        `**The field is never assigned.** ${c(fieldName)} is declared at ${at2(classFile, decl.index)} with no initializer, and nothing in ${c(basename4(classFile))} assigns it, so it is always \`null\`. Set it in the constructor.`
       );
       return;
     }
     const nullWrite = writes.find((i) => new RegExp(`${escape(fieldName)}\\s*=\\s*null\\s*;`).test(classLines[i]));
-    if (nullWrite !== void 0) steps.push(`${c(fieldName)} is set to \`null\` at ${at(classFile, nullWrite)}.`);
+    if (nullWrite !== void 0) steps.push(`${c(fieldName)} is set to \`null\` at ${at2(classFile, nullWrite)}.`);
   }
   async function propertyFiles(classLines) {
     const all = (await allFiles()).filter((f) => extname(f) === ".properties").slice(0, MAX_PROPERTY_FILES);
@@ -3731,7 +4174,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const hypotheses = [];
   const steps = [];
   const code2 = [];
-  const at = (file, index) => c(`${relative3(root, file)}:${index + 1}`);
+  const at2 = (file, index) => c(`${relative3(root, file)}:${index + 1}`);
   const addDefinition = (def2, role) => {
     if (code2.some((c2) => c2.heading.includes(`(${def2.name})`))) return;
     code2.push({
@@ -3749,12 +4192,12 @@ async function traceValue(kind, message, frames, root, allFiles) {
       const index = lines.findIndex((l) => new RegExp(`^${name2}\\s*(?::[^=]+)?=(?!=)`).test(l));
       if (index === -1) continue;
       const line = lines[index] ?? "";
-      steps.push(`${c(`${mod}.${name2}`)} is set at ${at(file, index)}: ${c(line.trim())}`);
+      steps.push(`${c(`${mod}.${name2}`)} is set at ${at2(file, index)}: ${c(line.trim())}`);
       const env = environment(line);
       const converted = new RegExp(`=\\s*(?:int|float|Decimal|bool|complex)\\s*\\(`).test(line);
       if (env !== null && !converted && /'str'/.test(message))
         hypotheses.push(
-          `**Environment value used as a number.** ${c(`${mod}.${name2}`)} comes from ${env} at ${at(file, index)}, which is always a string. Convert it where it is read (\`int(...)\` or \`float(...)\`), not at each use.`
+          `**Environment value used as a number.** ${c(`${mod}.${name2}`)} comes from ${env} at ${at2(file, index)}, which is always a string. Convert it where it is read (\`int(...)\` or \`float(...)\`), not at each use.`
         );
     }
     return hypotheses.length + steps.length === 0 ? null : { hypotheses, steps, code: code2 };
@@ -3765,7 +4208,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
     joined = `${(crashLines[i] ?? "").trim()}${joined.trim()}`;
   const target = targetOf(kind, message, joined, joined === crashLine ? crash.column : void 0);
   if (target === null) return null;
-  steps.push(`The bad value is ${c(target.expr)} at ${at(crash.file, crash.line - 1)}.`);
+  steps.push(`The bad value is ${c(target.expr)} at ${at2(crash.file, crash.line - 1)}.`);
   if (target.computed !== void 0)
     steps.push(`The key is computed: ${c(target.computed)} evaluated to ${c(`'${target.key}'`)} (from the KeyError message).`);
   const follow = async (start, from, throughFields = false) => {
@@ -3805,7 +4248,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
       while (assigned !== null) {
         const text = lines[assigned.index]?.trim() ?? "";
         steps.push(
-          assigned.loop ? `${c(name2)} is an element of ${c(assigned.rhs)} (${at(frame2.file, assigned.index)}).` : `${c(name2)} is assigned at ${at(frame2.file, assigned.index)}: ${c(text)}`
+          assigned.loop ? `${c(name2)} is an element of ${c(assigned.rhs)} (${at2(frame2.file, assigned.index)}).` : `${c(name2)} is assigned at ${at2(frame2.file, assigned.index)}: ${c(text)}`
         );
         element2 ||= assigned.loop;
         const alias = new RegExp(`^(${IDENT})$`).exec(assigned.rhs);
@@ -3834,7 +4277,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
       const args = callArgs2(callerLine, shortName2(frame2.function));
       const arg = args === null ? null : argumentFor(fn, args, name2, lang);
       if (arg === null) break;
-      steps.push(`${c(name2)} is a parameter of ${c(shortName2(frame2.function))}, passed as ${c(arg)} at ${at(caller.file, caller.line - 1)}.`);
+      steps.push(`${c(name2)} is a parameter of ${c(shortName2(frame2.function))}, passed as ${c(arg)} at ${at2(caller.file, caller.line - 1)}.`);
       const simple = new RegExp(`^(${IDENT})$`).exec(arg);
       if (simple === null && throughField(arg)) continue;
       const produced = simple === null ? offCall(arg) : null;
@@ -3871,7 +4314,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
         literal = { value: field[1], file: owner.producer.file, index: owner.producer.index };
     }
     if (literal !== null) {
-      steps.push(`The lookup key is ${c(literal.value)}${expr === literal.value ? "" : ` (${c(expr ?? "")})`}, set at ${at(literal.file, literal.index)}.`);
+      steps.push(`The lookup key is ${c(literal.value)}${expr === literal.value ? "" : ` (${c(expr ?? "")})`}, set at ${at2(literal.file, literal.index)}.`);
       seeds.push({ value: literal.value.slice(1, -1), file: literal.file, index: literal.index });
     }
   }
@@ -3881,20 +4324,20 @@ async function traceValue(kind, message, frames, root, allFiles) {
       const promiseShaped = lang === "js" ? target.expr !== target.root && !target.expr.startsWith(`${target.root}(`) : /'coroutine' object/.test(message);
       if (def.async && !call.awaited && !element && promiseShaped)
         hypotheses.push(
-          lang === "js" ? `**Missing \`await\`.** ${c(def.name)} is \`async\`, so ${c(producer.expr)} at ${at(producer.file, producer.index)} returns a Promise. ${c(name)} is that Promise, not the value, so ${c(target.expr)} is \`undefined\`. Likely fix: \`await\` the call.` : `**Missing \`await\`.** ${c(def.name)} is \`async def\`, so ${c(producer.expr)} at ${at(producer.file, producer.index)} returns a coroutine, not the value. Likely fix: \`await\` the call.`
+          lang === "js" ? `**Missing \`await\`.** ${c(def.name)} is \`async\`, so ${c(producer.expr)} at ${at2(producer.file, producer.index)} returns a Promise. ${c(name)} is that Promise, not the value, so ${c(target.expr)} is \`undefined\`. Likely fix: \`await\` the call.` : `**Missing \`await\`.** ${c(def.name)} is \`async def\`, so ${c(producer.expr)} at ${at2(producer.file, producer.index)} returns a coroutine, not the value. Likely fix: \`await\` the call.`
         );
       else if (isLookup && LOOKUP.test(def.lines.join("\n")))
         hypotheses.push(
-          `**The lookup found nothing.** ${c(call.module === null ? def.name : `${call.module}.${def.name}`)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
+          `**The lookup found nothing.** ${c(call.module === null ? def.name : `${call.module}.${def.name}`)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches, and ${c(producer.expr)} at ${at2(producer.file, producer.index)} got that. Check the key that was passed against the stored keys before guarding the crash site.`
         );
       const shifted = zipShift(def);
       if (shifted !== null)
         hypotheses.push(
-          `**Columns shifted.** ${c(shifted.text)} at ${at(def.file, shifted.index)} pairs ${c(shifted.left)} with ${c(shifted.right)}, which are sliced differently, so each key gets the next column's value${target.key === null ? "" : ` and the last key (here ${c(target.key)}) can go missing`}. Line the two sides up.`
+          `**Columns shifted.** ${c(shifted.text)} at ${at2(def.file, shifted.index)} pairs ${c(shifted.left)} with ${c(shifted.right)}, which are sliced differently, so each key gets the next column's value${target.key === null ? "" : ` and the last key (here ${c(target.key)}) can go missing`}. Line the two sides up.`
         );
     } else if (isLookup)
       hypotheses.push(
-        `**The lookup found nothing.** ${c(producer.expr)} at ${at(producer.file, producer.index)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
+        `**The lookup found nothing.** ${c(producer.expr)} at ${at2(producer.file, producer.index)} returns ${lang === "js" ? "`undefined`" : "`None`"} when no entry matches. Check the key it was given against the stored keys before guarding the crash site.`
       );
   }
   if (NIL_KINDS.has(kind) && seeds.length > 0) {
@@ -3916,7 +4359,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
         const near = [...keys].filter((k) => similar(k, read.key)).sort((a, b) => closeness(a, read.key) - closeness(b, read.key));
         runtimeMismatch = near.length > 0;
         hypotheses.unshift(
-          near.length > 0 ? `**Runtime value: wrong key.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}: it has ${c(near[0])}, not ${c(read.key)}.` : `**Runtime value: key missing.** At ${at(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}, with no ${c(read.key)}. Find out why the data lacks it before defaulting it.`
+          near.length > 0 ? `**Runtime value: wrong key.** At ${at2(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}: it has ${c(near[0])}, not ${c(read.key)}.` : `**Runtime value: key missing.** At ${at2(read.file, read.index)} the code reads ${c(read.text)}, but when it failed ${shown}, with no ${c(read.key)}. Find out why the data lacks it before defaulting it.`
         );
       }
       const samples = await payloadKeys(await allFiles(), files, lang, { file: read.file, index: read.index });
@@ -3925,12 +4368,12 @@ async function traceValue(kind, message, frames, root, allFiles) {
       const runtimeNear = [...keys].find((k) => k !== read.key && similar(k, read.key));
       if (!keys.has(read.key) && runtimeNear !== void 0 && sampleExact !== void 0)
         hypotheses.push(
-          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(runtimeNear)}, but the sample at ${at(sampleExact.file, sampleExact.index)} has ${c(read.key)}. Something between them renames it (a step that transforms the keys, a changed contract), or the sample is stale.`
+          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(runtimeNear)}, but the sample at ${at2(sampleExact.file, sampleExact.index)} has ${c(read.key)}. Something between them renames it (a step that transforms the keys, a changed contract), or the sample is stale.`
         );
       else if (keys.has(read.key) && sampleExact === void 0 && sampleNear.length > 0) {
         const first = sampleNear[0];
         hypotheses.push(
-          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(read.key)}, but the sample at ${at(first.file, first.index)} spells it ${c(first.key)}. The code matches the real data; the sample may be stale.`
+          `**The run and the repo disagree.** When it failed, ${c(read.container)} had ${c(read.key)}, but the sample at ${at2(first.file, first.index)} spells it ${c(first.key)}. The code matches the real data; the sample may be stale.`
         );
       }
     }
@@ -3946,7 +4389,7 @@ async function traceValue(kind, message, frames, root, allFiles) {
   if (fieldTarget !== null && !runtimeMismatch) {
     const origin = await files.fieldOrigin(fieldTarget.field, fieldTarget.producer, lang, allFiles);
     if (origin !== null && runtimeKeys?.has(origin.key) !== true) {
-      steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at(origin.file, origin.index)}.`);
+      steps.push(`${c(fieldTarget.field)} is set from ${c(origin.read)} at ${at2(origin.file, origin.index)}.`);
       const data = await payloadKeys(await allFiles(), files, lang, origin);
       const exact = data.some((k) => k.key === origin.key);
       const near = exact ? [] : data.filter((k) => similar(k.key, origin.key)).sort((a, b) => closeness(a.key, origin.key) - closeness(b.key, origin.key));
@@ -3954,10 +4397,10 @@ async function traceValue(kind, message, frames, root, allFiles) {
         payloadMismatch = true;
         const shown = unique(near.map((k) => k.key)).slice(0, 2).map((key2) => {
           const first = near.find((k) => k.key === key2);
-          return `${c(key2)} (${at(first.file, first.index)})`;
+          return `${c(key2)} (${at2(first.file, first.index)})`;
         });
         hypotheses.unshift(
-          `**Field name mismatch.** ${c(fieldTarget.field)} is read from ${c(origin.read)} at ${at(origin.file, origin.index)}, but no data sample in the project has ${c(origin.key)}; it has ${shown.join(" and ")}. If that is this data, read the key it actually uses rather than defaulting the missing value.`
+          `**Field name mismatch.** ${c(fieldTarget.field)} is read from ${c(origin.read)} at ${at2(origin.file, origin.index)}, but no data sample in the project has ${c(origin.key)}; it has ${shown.join(" and ")}. If that is this data, read the key it actually uses rather than defaulting the missing value.`
         );
       }
     }
@@ -3969,9 +4412,9 @@ async function traceValue(kind, message, frames, root, allFiles) {
     if (dropped !== null) {
       const where = fullPath.slice(0, -1).join(".");
       const missing = fullPath.at(-1);
-      steps.push(`${c(name)} comes from ${c(producer.expr)}, built by the merge ${c(dropped.merge)} at ${at(def.file, dropped.mergeIndex)}.`);
+      steps.push(`${c(name)} comes from ${c(producer.expr)}, built by the merge ${c(dropped.merge)} at ${at2(def.file, dropped.mergeIndex)}.`);
       hypotheses.unshift(
-        `**Shallow merge drops a nested key.** ${c(dropped.merge)} at ${at(def.file, dropped.mergeIndex)} replaces whole top-level values. The source at ${at(dropped.override.file, dropped.override.index)} sets ${c(where)} without ${c(missing)}, so ${c(`${where}.${missing}`)} from ${at(dropped.base.file, dropped.base.index)} is lost. Merge nested objects deeply, or set ${c(missing)} in that override.`
+        `**Shallow merge drops a nested key.** ${c(dropped.merge)} at ${at2(def.file, dropped.mergeIndex)} replaces whole top-level values. The source at ${at2(dropped.override.file, dropped.override.index)} sets ${c(where)} without ${c(missing)}, so ${c(`${where}.${missing}`)} from ${at2(dropped.base.file, dropped.base.index)} is lost. Merge nested objects deeply, or set ${c(missing)} in that override.`
       );
     }
   }
@@ -3982,14 +4425,14 @@ async function traceValue(kind, message, frames, root, allFiles) {
   const builderNear = builder === null ? [] : builder.keys.filter((k) => similar(k, target.key));
   if (builder !== null && builderNear.length > 0) {
     hypotheses.push(
-      `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
+      `**Field name mismatch.** The ${lang === "python" ? "dict" : "object"} built at ${at2(builder.file, builder.index)} has ${builder.shared.map((k) => c(k)).join(", ")}, which this code also reads, but no ${c(target.key)}; it has ${builderNear.map((k) => c(k)).join(", ")} instead. The code that builds it and the code that reads it disagree on the name: fix one side rather than defaulting the missing key.`
     );
   } else if (target.key !== null && !selfRooted && !external && !payloadMismatch && !runtimeMismatch && runtimeKeys?.has(target.key) !== true) {
     const keys = await writtenKeys(await allFiles(), files, lang);
     const exact = keys.filter((k) => k.key === target.key);
     const near = keys.filter((k) => k.key !== target.key && similar(k.key, target.key));
     if (exact.length === 0 && near.length > 0) {
-      const list = unique(near.map((k) => `${c(k.key)} (${at(k.file, k.index)})`)).slice(0, 3).join(", ");
+      const list = unique(near.map((k) => `${c(k.key)} (${at2(k.file, k.index)})`)).slice(0, 3).join(", ");
       hypotheses.push(
         `**Field name mismatch.** No code under the source root writes ${c(target.key)}, but ${list} ${near.length === 1 ? "is" : "are"} written. The code that builds this ${lang === "python" ? "dict" : "object"} and the code that reads it probably disagree on the name; fix one side rather than defaulting the missing key.`
       );
@@ -4438,10 +4881,10 @@ var Files = class {
     const stem = basename5(spec).replace(/\.[cm]?[jt]s$|\.py$/, "");
     for (const candidate of (await allFiles()).filter((f) => basename5(f, extname2(f)) === stem && LANG[extname2(f)] !== void 0)) {
       const lines = await this.lines(candidate);
-      const at = lines?.findIndex((l) => new RegExp(`\\b${field}["']?\\s*[:=]\\s*(["'])[^"']*\\1`).test(l)) ?? -1;
-      if (lines === null || at === -1) continue;
-      const value = new RegExp(`\\b${field}["']?\\s*[:=]\\s*((["'])[^"']*\\2)`).exec(lines[at])?.[1];
-      return { value, file: candidate, index: at };
+      const at2 = lines?.findIndex((l) => new RegExp(`\\b${field}["']?\\s*[:=]\\s*(["'])[^"']*\\1`).test(l)) ?? -1;
+      if (lines === null || at2 === -1) continue;
+      const value = new RegExp(`\\b${field}["']?\\s*[:=]\\s*((["'])[^"']*\\2)`).exec(lines[at2])?.[1];
+      return { value, file: candidate, index: at2 };
     }
     return null;
   }
@@ -4576,11 +5019,11 @@ var Files = class {
     const resolved = [];
     for (const source of merge.sources) resolved.push(await this.shapesOf(source, def, lang, allFiles));
     const holds = (shape, keys) => {
-      let at = shape;
+      let at2 = shape;
       for (const key of keys) {
-        if (!(at instanceof Map)) return null;
-        at = at.get(key);
-        if (at === void 0) return false;
+        if (!(at2 instanceof Map)) return null;
+        at2 = at2.get(key);
+        if (at2 === void 0) return false;
       }
       return true;
     };
@@ -4601,11 +5044,11 @@ var Files = class {
     return null;
   }
   /** The line that sets `key` in the literal starting at `at.index`, else the literal's first line. */
-  async keyLine(at, key) {
-    const lines = await this.lines(at.file) ?? [];
+  async keyLine(at2, key) {
+    const lines = await this.lines(at2.file) ?? [];
     const pattern = new RegExp(`(?:^|[{,\\s])["']?${escape2(key)}["']?\\s*:`);
-    for (let i = at.index; i < Math.min(lines.length, at.index + 200); i++) if (pattern.test(lines[i])) return i;
-    return at.index;
+    for (let i = at2.index; i < Math.min(lines.length, at2.index + 200); i++) if (pattern.test(lines[i])) return i;
+    return at2.index;
   }
   /** The literal shapes a merge source can be: `require("./x")`, `mod.NAME`, a variable assigned one, or a ternary of them. */
   async shapesOf(expr, def, lang, allFiles, depth = 0) {
@@ -4795,9 +5238,9 @@ async function attachSource(issue, root) {
         return b.commit === "uncommitted" ? `\`${s.path}:${s.location.line}\`: not committed yet (local change)` : `\`${s.path}:${s.location.line}\`: ${b.author}, ${b.date}, \`${b.commit}\` "${b.summary}"`;
       })
     });
-  const at = issue.sections.findIndex((s) => s.heading === "Stack trace" || s.heading === "Backtrace");
+  const at2 = issue.sections.findIndex((s) => s.heading === "Stack trace" || s.heading === "Backtrace");
   const merged = [...issue.sections];
-  merged.splice(at === -1 ? 0 : at + 1, 0, ...sections);
+  merged.splice(at2 === -1 ? 0 : at2 + 1, 0, ...sections);
   const trace = issue.message === void 0 ? null : await traceValue(issue.kind, issue.message, traceFrames, realRoot, async () => {
     index ??= await indexByBasename(realRoot);
     return [...index.values()].flat();
