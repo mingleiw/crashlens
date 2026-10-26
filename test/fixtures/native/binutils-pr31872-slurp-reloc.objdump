@@ -1,0 +1,76 @@
+  8805d8:	mov    0x10(%rsp),%rax
+  8805dd:	mov    0x24(%rsp),%edx
+  8805e1:	lea    -0x8(%rax,%r8,8),%rax
+  8805e6:	cmp    %r8,%rdx
+  8805e9:	jb     880720 <warn@@Base+0x1465a0>
+  8805ef:	mov    %rax,0x0(%rbp)
+  8805f3:	mov    0x40(%rsp),%rax
+  8805f8:	mov    %rax,0x10(%rbp)
+  8805fc:	cmp    $0x18,%r12d
+  880600:	je     8806f0 <warn@@Base+0x146570>
+  880606:	mov    0x50(%r13),%rax
+  88060a:	test   %rax,%rax
+  88060d:	je     880710 <warn@@Base+0x146590>
+  880613:	mov    (%rsp),%rdx
+  880617:	mov    %rbp,%rsi
+  88061a:	mov    %rbx,%rdi
+  88061d:	call   *%rax
+  88061f:	test   %al,%al
+  880621:	je     8806c0 <warn@@Base+0x146540>
+  880627:	cmpq   $0x0,0x18(%rbp)
+  88062c:	je     8806c0 <warn@@Base+0x146540>
+  880632:	movslq %r12d,%rax
+  880635:	add    $0x1,%r15d
+  880639:	mov    0x8(%rsp),%rcx
+  88063e:	add    $0x20,%rbp
+  880642:	add    %rax,%r14
+  880645:	mov    %r15d,%eax
+  880648:	cmp    %rcx,%rax
+  88064b:	jae    880750 <warn@@Base+0x1465d0>
+  880651:	cmp    $0x18,%r12d
+  880655:	je     8806d8 <warn@@Base+0x146558>
+  88065b:	mov    0x8(%rbx),%rax
+  88065f:	mov    %r14,%rdi
+  880662:	call   *0x70(%rax)
+  880665:	lea    0x8(%r14),%rdi
+  880669:	mov    %rax,0x30(%rsp)
+  88066e:	mov    0x8(%rbx),%rax
+  880672:	call   *0x70(%rax)
+  880675:	movq   $0x0,0x40(%rsp)
+  88067e:	mov    %rax,0x38(%rsp)
+  880683:	mov    %rax,%r8
+  880686:	mov    0x30(%rsp),%rax
+  88068b:	testb  $0x42,0x44(%rbx)
+  88068f:	je     8806a1 <warn@@Base+0x146521>
+  880691:	cmpb   $0x0,0x23(%rsp)
+  880696:	jne    8806a1 <warn@@Base+0x146521>
+  880698:	mov    0x18(%rsp),%rsi
+  88069d:	sub    0x30(%rsi),%rax
+  8806a1:	shr    $0x20,%r8
+  8806a5:	mov    %rax,0x8(%rbp)
+  8806a9:	jne    8805d8 <warn@@Base+0x146458>
+  8806af:	mov    0x125cbca(%rip),%rax        # 1add280 <_obstack_memory_used@@Base+0xed8bf0>
+  8806b6:	jmp    8805ef <warn@@Base+0x14646f>
+  8806bb:	nopl   0x0(%rax,%rax,1)
+  8806c0:	mov    0x28(%rsp),%r9
+  8806c5:	mov    %r9,%rdi
+  8806c8:	call   6fa850 <free@plt>
+  8806cd:	xor    %eax,%eax
+  8806cf:	jmp    880762 <warn@@Base+0x1465e2>
+  8806d4:	nopl   0x0(%rax)
+  8806d8:	mov    (%rsp),%rdx
+  8806dc:	mov    %r14,%rsi
+  8806df:	mov    %rbx,%rdi
+  8806e2:	call   87f2b0 <warn@@Base+0x145130>
+  8806e7:	mov    0x38(%rsp),%r8
+  8806ec:	jmp    880686 <warn@@Base+0x146506>
+  8806ee:	xchg   %ax,%ax
+  8806f0:	mov    0x48(%r13),%rax
+  8806f4:	test   %rax,%rax
+  8806f7:	jne    880613 <warn@@Base+0x146493>
+  8806fd:	mov    0x50(%r13),%rax
+  880701:	test   %rax,%rax
+  880704:	jne    880613 <warn@@Base+0x146493>
+  88070a:	nopw   0x0(%rax,%rax,1)
+  880710:	mov    0x48(%r13),%rax
+  880714:	jmp    880613 <warn@@Base+0x146493>

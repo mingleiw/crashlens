@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { classify, refineWithFrames, type Classification } from "./classify.js";
-import { disassembleAround, type DisasmLine } from "./disasm.js";
-import { binaryBuildId, coreImageBuildId, functionRanges, type FunctionRange } from "./elf.js";
+import { disassembleFunction, sourceLines, windowAround, type DisasmLine } from "./disasm.js";
+import { binaryBuildId, coreImageBuildId, describeLinkedAddress, elfLayout, functionRanges, readCoreBytes, type FunctionRange } from "./elf.js";
 import { inspectWithGdb, type GdbInstruction, type GdbReport } from "./gdb.js";
+import { traceNullCall, type NullCallTrace, type Slot } from "./nullCall.js";
 import { parseNtFile } from "./ntFile.js";
 import {
   decompileFunction,
@@ -15,9 +16,10 @@ import {
   type ReaCommand,
   type RecordedCrash,
 } from "./rea.js";
-import { err, ok, type Result } from "./result.js";
+import { err, ok, type Result, type TriageError } from "./result.js";
 import {
   createSymbolizer,
+  hex,
   type Location,
   type Symbolizer,
 } from "./symbolize.js";
@@ -87,8 +89,34 @@ export interface TriageReport {
   readonly disassembly: readonly DisasmLine[] | null;
   /** Pseudocode of the focus function and of its nearest caller in the binary. */
   readonly decompiled: readonly DecompiledFunction[];
+  /** For a call through a NULL function pointer: where the caller loaded the target. */
+  readonly nullCall: NullCallReport | null;
   readonly warnings: readonly string[];
   readonly limitations: readonly string[];
+}
+
+/** A slot named by the NULL-call trace, read back from the core. */
+export interface SlotReading {
+  readonly slot: Slot;
+  /** "target": the load that fed the call; "check": a NULL test that routed execution there. */
+  readonly role: "target" | "check";
+  /** Base register value at the crash (null when it changed after the load). */
+  readonly baseValue: bigint | null;
+  /** The slot's 8 bytes in the core, when recorded. */
+  readonly value: bigint | null;
+  /** What the base register points into, e.g. "the binary's .data.rel.ro". */
+  readonly region: string | null;
+  /** True when the region is data the program was built with (read-only or relocated tables). */
+  readonly builtIn: boolean;
+  /** Source line of the instruction that reads the slot, when the binary has line info. */
+  readonly line: string | null;
+}
+
+export interface NullCallReport {
+  /** Function holding the indirect call. */
+  readonly caller: string;
+  readonly trace: NullCallTrace;
+  readonly slots: readonly SlotReading[];
 }
 
 export interface DecompiledFunction extends Decompilation {
@@ -124,11 +152,34 @@ export async function triage(
       : inspectWithGdb(options.binaryPath, options.corePath, options.gdb),
   ]);
   if (!crash.ok) return crash;
-  if (!layout.ok) return layout;
+  const binary = layout.ok ? layout.value : await layoutFromElf(options.binaryPath, layoutFailure(layout.error));
+  if (binary === null) return layout as Result<never>;
   const facts = await readFileFacts(options, crash.value);
-  const report = buildReport(options, crash.value, layout.value, gdb, facts);
+  const report = buildReport(options, crash.value, binary, gdb, facts);
   if (!report.ok) return report;
-  return ok(await explainFocus(options, report.value));
+  return ok(await explainFocus(options, report.value, facts));
+}
+
+/** REA's specific reason (e.g. its reply budget) when it gave one, else the generic message. */
+function layoutFailure(error: TriageError): string {
+  const detail = error.detail as { details?: { reason?: unknown } } | undefined;
+  const reason = detail?.details?.reason;
+  return typeof reason === "string" ? `REA inspect-binary-layout failed: ${reason}` : error.message;
+}
+
+/** REA's layout failed (e.g. its result for a large binary is over its reply budget): read the ELF headers directly. */
+async function layoutFromElf(binaryPath: string, reason: string): Promise<BinaryLayout | null> {
+  const elf = await elfLayout(binaryPath).catch(() => null);
+  if (elf === null) return null;
+  return {
+    evidenceId: null,
+    binarySha256: elf.sha256,
+    imageType: elf.imageType,
+    loadSegments: elf.loadSegments,
+    functions: elf.functions,
+    mitigations: null,
+    fallbackReason: reason,
+  };
 }
 
 async function readFileFacts(options: TriageOptions, crash: RecordedCrash): Promise<FileFacts> {
@@ -154,10 +205,15 @@ async function readFileFacts(options: TriageOptions, crash: RecordedCrash): Prom
 }
 
 /** Disassemble (and optionally decompile) the function the report points at. */
-async function explainFocus(options: TriageOptions, report: TriageReport): Promise<TriageReport> {
+async function explainFocus(options: TriageOptions, report: TriageReport, facts: FileFacts = NO_FILE_FACTS): Promise<TriageReport> {
   const focus = report.focus;
   if (focus === null) return report;
-  const disassembly = await disassembleAround(options.binaryPath, focus.start, focus.end, focus.target).catch(() => null);
+  const lines = await disassembleFunction(options.binaryPath, focus.start, focus.end).catch(() => null);
+  const disassembly = lines === null ? null : windowAround(lines, focus.target);
+  const nullCall =
+    report.classification.kind === "null-function-call" && focus.reason === "caller" && lines !== null
+      ? await readNullCall(options, report, facts, focus, lines).catch(() => null)
+      : null;
   const decompiled: DecompiledFunction[] = [];
   const warnings = [...report.warnings];
   const auto = (options.decompile ?? "auto") === "auto";
@@ -182,7 +238,62 @@ async function explainFocus(options: TriageOptions, report: TriageReport): Promi
       break;
     }
   }
-  return { ...report, disassembly, decompiled, warnings };
+  if (nullCall === null) return { ...report, disassembly, decompiled, warnings };
+  const names = new Set([nullCall.trace.register, ...nullCall.slots.map((reading) => reading.slot.base)]);
+  const relevantRegisters = report.crash.registers.filter((entry) => names.has(entry.name));
+  return { ...report, disassembly, decompiled, warnings, nullCall, relevantRegisters };
+}
+
+const BUILT_IN_SECTIONS = /^\.(rodata|data\.rel\.ro)/;
+/** How far below the stack pointer a base register may point and still be called "the stack". */
+const STACK_REACH = 8n << 20n;
+
+/**
+ * Trace the NULL call target in the caller's code, then read each slot it names
+ * from the core. Registers in the core are the caller's at the call: the
+ * callee at address 0 never ran.
+ */
+async function readNullCall(
+  options: TriageOptions,
+  report: TriageReport,
+  facts: FileFacts,
+  focus: FocusFunction,
+  lines: readonly { address: bigint; text: string }[],
+): Promise<NullCallReport | null> {
+  // focus.target is the byte before the return address.
+  const trace = traceNullCall(lines, focus.target + 1n);
+  if (trace === null) return null;
+  const mappings = report.crash.ntFileDescriptor === null ? null : parseNtFile(report.crash.ntFileDescriptor);
+  if (mappings === null || !mappings.ok) return null;
+  const symbolizer = createSymbolizer(options.binaryPath, mappings.mappings, report.layout, facts.unwindRanges, facts.mappedName);
+  const sp = register(report.crash, "rsp");
+  const read = async (slot: Slot, role: SlotReading["role"], baseChanged = false): Promise<SlotReading> => {
+    const base = baseChanged ? null : register(report.crash, slot.base);
+    if (base === null) return { slot, role, baseValue: null, value: null, region: null, builtIn: false, line: null };
+    const address = BigInt.asUintN(64, base + slot.offset);
+    const bytes = await readCoreBytes(options.corePath, address, 8).catch(() => null);
+    const where = symbolizer.locate(base);
+    let region: string | null = null;
+    let builtIn = false;
+    if (where.kind === "binary" || where.kind === "binary-function") {
+      const place = await describeLinkedAddress(options.binaryPath, where.moduleOffset).catch(() => null);
+      builtIn = place?.section != null && BUILT_IN_SECTIONS.test(place.section);
+      region = `the binary's ${place?.section ?? "image"} at link address ${hex(where.moduleOffset)}${place?.symbol == null ? "" : ` (\`${place.symbol.name}${place.symbol.offset === 0n ? "" : `+${hex(place.symbol.offset)}`}\`${place.symbol.file === null ? "" : ` from ${place.symbol.file}`})`}`;
+    } else if (where.kind === "other-module") region = `\`${where.module}\`+${hex(where.moduleOffset)}`;
+    else if (sp !== null && base <= sp + STACK_REACH && base + STACK_REACH >= sp) region = "the stack";
+    else if (where.kind === "unmapped") region = "memory not backed by a file (heap or mmap)";
+    return { slot, role, baseValue: base, value: bytes === null ? null : bytes.readBigUInt64LE(0), region, builtIn, line: null };
+  };
+  const slots: SlotReading[] = [];
+  if (trace.slot !== null) slots.push(await read(trace.slot, "target"));
+  for (const source of trace.sources) {
+    if (source.kind !== "load") continue;
+    slots.push(await read(source, "target", source.baseChanged));
+    for (const check of source.reachedWhenNull)
+      if (!slots.some((s) => s.slot.base === check.base && s.slot.offset === check.offset)) slots.push(await read(check, "check"));
+  }
+  const lineOf = await sourceLines(options.binaryPath, slots.map((reading) => reading.slot.address)).catch(() => new Map<bigint, string>());
+  return { caller: focus.name, trace, slots: slots.map((reading) => ({ ...reading, line: lineOf.get(reading.slot.address) ?? null })) };
 }
 
 /** Exported for tests: pure assembly of a report from adapter results. */
@@ -275,6 +386,7 @@ export function buildReport(
     focus: focusFunction(faultLocation, firstOwnFrame, facts.unwindRanges),
     disassembly: null,
     decompiled: [],
+    nullCall: null,
     gdb:
       gdb.status === "ok"
         ? { status: "ok" }
@@ -287,6 +399,9 @@ export function buildReport(
         : buildId.status === "mismatch"
           ? "The binary's GNU build ID differs from the image recorded in the core, so this report likely describes the wrong build."
           : "The binary is matched to the core by file name only (no build ID in one of them, or the core did not record the binary's headers). Rebuilt binaries give wrong function names.",
+      ...(layout.fallbackReason === undefined
+        ? []
+        : [`Segments and symbols were read by crashlens from the binary's ELF headers because ${layout.fallbackReason.replace(/\.$/, "")}. No build-hardening facts.`]),
       ...(frames.some((frame) => frame.location.kind === "binary-function" && frame.location.symbol.origin === "eh_frame")
         ? ["sub_<address> names mark functions found in the binary's .eh_frame unwind tables because it has no symbol table entry for them."]
         : []),

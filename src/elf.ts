@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 
 /**
@@ -224,6 +226,181 @@ export async function functionRanges(path: string): Promise<FunctionRange[]> {
       ranges.push({ start: entry.start, end });
     }
     return ranges.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  } finally {
+    await file.close();
+  }
+}
+
+export interface ElfFunctionSymbol {
+  readonly name: string;
+  readonly value: bigint;
+  readonly size: bigint;
+}
+
+/** What the symbolizer needs from a binary, read without REA. */
+export interface ElfLayout {
+  readonly sha256: string;
+  /** "ET_EXEC" or "ET_DYN", spelled as REA spells it. */
+  readonly imageType: string;
+  readonly loadSegments: readonly { readonly offset: bigint; readonly virtualAddress: bigint }[];
+  readonly functions: readonly ElfFunctionSymbol[];
+}
+
+const SHT_SYMTAB = 2;
+const SHT_DYNSYM = 11;
+const STT_OBJECT = 1;
+const STT_FUNC = 2;
+const STT_FILE = 4;
+const STB_LOCAL = 0;
+const MAX_SECTIONS = 1 << 16;
+const MAX_SYMTAB_BYTES = 512 << 20;
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+interface SectionHeader {
+  readonly nameOffset: number;
+  readonly type: number;
+  readonly addr: bigint;
+  readonly offset: bigint;
+  readonly size: bigint;
+  readonly link: number;
+  readonly entsize: bigint;
+}
+
+async function readSections(file: FileHandle): Promise<SectionHeader[]> {
+  const ehdr = await readAt(file, 0n, 64);
+  if (ehdr.length < 64) return [];
+  const shoff = ehdr.readBigUInt64LE(40);
+  const shentsize = ehdr.readUInt16LE(58);
+  const shnum = ehdr.readUInt16LE(60);
+  if (shoff === 0n || shentsize < 64 || shnum > MAX_SECTIONS) return [];
+  const table = await readAt(file, shoff, shentsize * shnum);
+  const sections: SectionHeader[] = [];
+  for (let i = 0; (i + 1) * shentsize <= table.length; i++) {
+    const base = i * shentsize;
+    sections.push({
+      nameOffset: table.readUInt32LE(base),
+      type: table.readUInt32LE(base + 4),
+      addr: table.readBigUInt64LE(base + 16),
+      offset: table.readBigUInt64LE(base + 24),
+      size: table.readBigUInt64LE(base + 32),
+      link: table.readUInt32LE(base + 40),
+      entsize: table.readBigUInt64LE(base + 56),
+    });
+  }
+  return sections;
+}
+
+interface RawSymbol {
+  readonly name: string;
+  readonly type: number;
+  readonly value: bigint;
+  readonly size: bigint;
+  /** Source file of a local symbol (the STT_FILE entry before it), e.g. "elf64-amdgcn.c". */
+  readonly file: string | null;
+}
+
+/** Defined symbols of .symtab, else .dynsym (what `strip` leaves). */
+async function readSymbols(file: FileHandle, sections: readonly SectionHeader[]): Promise<RawSymbol[]> {
+  const symtab = sections.find((s) => s.type === SHT_SYMTAB) ?? sections.find((s) => s.type === SHT_DYNSYM);
+  const strtab = symtab === undefined ? undefined : sections[symtab.link];
+  if (
+    symtab === undefined || strtab === undefined || symtab.entsize < 24n ||
+    symtab.size > BigInt(MAX_SYMTAB_BYTES) || strtab.size > BigInt(MAX_SYMTAB_BYTES)
+  ) return [];
+  const symbols = await readAt(file, symtab.offset, Number(symtab.size));
+  const strings = await readAt(file, strtab.offset, Number(strtab.size));
+  const entsize = Number(symtab.entsize);
+  const out: RawSymbol[] = [];
+  let sourceFile: string | null = null;
+  for (let pos = 0; pos + 24 <= symbols.length; pos += entsize) {
+    const nameOffset = symbols.readUInt32LE(pos);
+    const info = symbols[pos + 4] as number;
+    const shndx = symbols.readUInt16LE(pos + 6);
+    const value = symbols.readBigUInt64LE(pos + 8);
+    if (nameOffset >= strings.length) continue;
+    if ((info & 0x0f) === STT_FILE) {
+      sourceFile = cString(strings, nameOffset) || null;
+      continue;
+    }
+    if (shndx === 0 || value === 0n) continue;
+    const local = info >> 4 === STB_LOCAL;
+    const name = cString(strings, nameOffset);
+    if (name !== "") out.push({ name, type: info & 0x0f, value, size: symbols.readBigUInt64LE(pos + 16), file: local ? sourceFile : null });
+  }
+  return out;
+}
+
+function cString(bytes: Buffer, offset: number): string {
+  const end = bytes.indexOf(0, offset);
+  return bytes.subarray(offset, end === -1 ? bytes.length : end).toString("utf8");
+}
+
+/**
+ * Load segments and defined function symbols (.symtab, else .dynsym) straight
+ * from the ELF headers. Used when REA's layout inspection cannot answer, e.g.
+ * when its full result for a large binary exceeds REA's reply budget.
+ */
+export async function elfLayout(path: string): Promise<ElfLayout | null> {
+  const file = await open(path, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null || (headers.type !== 2 && headers.type !== 3)) return null;
+    const symbols = await readSymbols(file, await readSections(file));
+    return {
+      sha256: await sha256File(path),
+      imageType: headers.type === 3 ? "ET_DYN" : "ET_EXEC",
+      loadSegments: headers.phdrs
+        .filter((ph) => ph.type === PT_LOAD)
+        .map((ph) => ({ offset: ph.offset, virtualAddress: ph.vaddr })),
+      functions: symbols
+        .filter((symbol) => symbol.type === STT_FUNC)
+        .map(({ name, value, size }) => ({ name, value, size })),
+    };
+  } finally {
+    await file.close();
+  }
+}
+
+/** The section (and data symbol, when the binary still has one) holding a link-time address. */
+export interface LinkedPlace {
+  readonly section: string | null;
+  readonly symbol: { readonly name: string; readonly offset: bigint; readonly file: string | null } | null;
+}
+
+export async function describeLinkedAddress(path: string, linked: bigint): Promise<LinkedPlace> {
+  const file = await open(path, "r");
+  try {
+    const sections = await readSections(file);
+    const names = sections[ehdrShstrndx(await readAt(file, 0n, 64))];
+    const holder = sections.find((s) => s.addr !== 0n && linked >= s.addr && linked < s.addr + s.size);
+    let section: string | null = null;
+    if (holder !== undefined && names !== undefined && names.size <= BigInt(MAX_NOTE_BYTES))
+      section = cString(await readAt(file, names.offset, Number(names.size)), holder.nameOffset) || null;
+    const object = (await readSymbols(file, sections)).find(
+      (symbol) => symbol.type === STT_OBJECT && linked >= symbol.value && linked < symbol.value + (symbol.size === 0n ? 1n : symbol.size),
+    );
+    return { section, symbol: object === undefined ? null : { name: object.name, offset: linked - object.value, file: object.file } };
+  } finally {
+    await file.close();
+  }
+}
+
+function ehdrShstrndx(ehdr: Buffer): number {
+  return ehdr.length < 64 ? -1 : ehdr.readUInt16LE(62);
+}
+
+/** `length` bytes at runtime `address` from the core's recorded memory, or null when not dumped. */
+export async function readCoreBytes(corePath: string, address: bigint, length: number): Promise<Buffer | null> {
+  const file = await open(corePath, "r");
+  try {
+    const headers = await readHeaders(file);
+    if (headers === null || headers.type !== 4) return null;
+    return await readCoreMemory(file, headers.phdrs.filter((ph) => ph.type === PT_LOAD), address, length);
   } finally {
     await file.close();
   }

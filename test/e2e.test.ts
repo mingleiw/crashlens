@@ -101,6 +101,55 @@ describe(
   },
 );
 
+// A per-target table with neither handler set and a fallback that calls without checking (binutils PR 31872).
+const HOOKS_SOURCE = `
+#include <stddef.h>
+struct backend { const char *name; int machine; int (*convert)(int); int (*convert_rel)(int); };
+static int twice(int x) { return 2 * x; }
+static const struct backend backends[] = {
+  { "generic", 1, twice, NULL },
+  { "gpu", 224, NULL, NULL },
+};
+__attribute__((noinline)) static int convert(const struct backend *b, int x) {
+  int r = b->convert_rel != NULL ? b->convert_rel(x) : b->convert(x);
+  return r + b->machine;
+}
+int main(int argc, char **argv) { (void)argv; return convert(&backends[argc], 3); }
+`;
+
+describe(
+  "crashlens end to end: NULL function pointer",
+  { skip: missing.length > 0 && `needs ${missing.join(", ")}` },
+  () => {
+    it("traces a NULL call target to the table built into the binary", () => {
+      const work = mkdtempSync(join(tmpdir(), "crashlens-"));
+      try {
+        writeFileSync(join(work, "hooks.c"), HOOKS_SOURCE);
+        execFileSync("gcc", ["-O2", "-o", "hooks", "hooks.c"], { cwd: work });
+        spawnSync("sh", ["-c", "ulimit -c unlimited; ./hooks"], { cwd: work });
+        const core = join(work, "core");
+        if (!existsSync(core)) {
+          console.warn("skipping assertions: the kernel did not write ./core (check core_pattern)");
+          return;
+        }
+        const markdown = execFileSync(process.execPath, [cli, core, join(work, "hooks")], { encoding: "utf8" });
+        assert.match(markdown, /^# Crash: Call through a NULL function pointer in `convert/);
+        assert.match(markdown, /NULL function pointer from a table built into the binary/);
+        assert.match(markdown, /\.data\.rel\.ro at link address 0x[0-9a-f]+ \(`backends\+0x20` from hooks\.c\)/);
+        assert.match(markdown, /is 0 \(NULL\) in the core/);
+
+        // Stripped: no data symbol, but the section and the core's slot value remain.
+        execFileSync("strip", ["--strip-all", "-o", "hooks-stripped", "hooks"], { cwd: work });
+        const stripped = execFileSync(process.execPath, [cli, core, join(work, "hooks-stripped")], { encoding: "utf8" });
+        assert.match(stripped, /points into the binary's \.data\.rel\.ro at link address 0x[0-9a-f]+;/);
+        assert.match(stripped, /is 0 \(NULL\) in the core/);
+      } finally {
+        rmSync(work, { recursive: true, force: true });
+      }
+    });
+  },
+);
+
 const GO_SOURCE = `package main
 
 type Order struct{ Items []int }

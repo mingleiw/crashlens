@@ -51,7 +51,7 @@ export function toCoreIssue(report: TriageReport): Issue {
     });
   if (report.relevantRegisters.length > 0)
     sections.push({
-      heading: "Registers used by the faulting instruction",
+      heading: report.nullCall == null ? "Registers used by the faulting instruction" : "Registers at the NULL call",
       kind: "list",
       items: report.relevantRegisters.map(
         (entry) =>
@@ -124,7 +124,7 @@ export function toCoreIssue(report: TriageReport): Issue {
     evidence: [
       `Core: \`${report.corePath}\` (sha256 \`${crash.coreSha256}\`)`,
       `Binary: \`${report.binaryPath}\` (sha256 \`${report.layout.binarySha256}\`, ${report.layout.imageType})`,
-      `REA evidence: crash \`${crash.evidenceId}\`, layout \`${report.layout.evidenceId}\`${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
+      `REA evidence: crash \`${crash.evidenceId}\`, layout ${report.layout.evidenceId === null ? "read from the ELF headers by crashlens" : `\`${report.layout.evidenceId}\``}${report.decompiled.map((fn) => `, decompilation of ${fn.name} \`${fn.evidenceId}\``).join("")}`,
       `gdb: ${report.gdb.status}${report.gdb.reason === undefined ? "" : ` (${report.gdb.reason})`}`,
       ...(report.layout.mitigations === null
         ? []
@@ -142,7 +142,11 @@ export function toCoreIssue(report: TriageReport): Issue {
 function summary(report: TriageReport, whereName: string): string {
   const { classification } = report;
   const inLibrary =
-    report.firstOwnFrame !== null && report.frames[0] !== undefined
+    classification.kind === "null-function-call"
+      ? report.nullCall == null
+        ? ""
+        : ` The indirect call \`${report.nullCall.trace.callText}\` at \`${hex(report.nullCall.trace.callAddress)}\` in \`${report.nullCall.caller}\` jumped to address 0.`
+      : report.firstOwnFrame !== null && report.frames[0] !== undefined
       ? ` The crash happened inside \`${frameName(report.frames[0])}\`, called from \`${whereName}\` in your binary.`
       : "";
   return `\`${report.program}\` crashed with **${classification.signalName}**: ${classification.title.toLowerCase()} at \`${whereName}\`.${inLibrary} ${classification.explanation}`;

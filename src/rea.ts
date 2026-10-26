@@ -63,12 +63,15 @@ export interface LayoutSegment {
 
 /** Facts this package uses from `rea inspect-binary-layout`. */
 export interface BinaryLayout {
-  readonly evidenceId: string;
+  /** null when the layout was read by crashlens itself (see `fallbackReason`). */
+  readonly evidenceId: string | null;
   readonly binarySha256: string;
   readonly imageType: string;
   readonly loadSegments: readonly LayoutSegment[];
   readonly functions: readonly LayoutSymbol[];
   readonly mitigations: Readonly<Record<string, unknown>> | null;
+  /** Why REA's layout could not be used, when crashlens read the ELF headers instead. */
+  readonly fallbackReason?: string;
 }
 
 const READ_TIMEOUT_MS = 180_000;
