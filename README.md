@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mingleiw/crashlens/actions/workflows/ci.yml/badge.svg)](https://github.com/mingleiw/crashlens/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Featured by Awesome REA](https://raw.githubusercontent.com/reacher-z/Awesome-REA/main/assets/featured-by-awesome-rea-inline.svg)](https://github.com/reacher-z/Awesome-REA)
 
 **Logs tell you where your program was. crashlens tells you why it died.**
 
