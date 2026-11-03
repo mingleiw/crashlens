@@ -6226,6 +6226,7 @@ async function serve(options) {
   const analyzed = [];
   let generation = 0;
   const inUse = /* @__PURE__ */ new Map();
+  const asking = /* @__PURE__ */ new Set();
   let sourceRoot = options.sourceRoot;
   const maxUpload = options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD;
   let port = options.port;
@@ -6349,7 +6350,16 @@ async function serve(options) {
       const body2 = await readJson(req);
       const entry = analyzed.find((a) => a.id === body2["id"]);
       if (entry === void 0) throw new HttpError(404, "Unknown report.");
-      const result = await suggestFix(entry.issue);
+      if (entry.issue.sections.some((s) => s.kind === "markdown"))
+        throw new HttpError(409, "This report already has an AI suggestion.");
+      if (asking.has(entry.id)) throw new HttpError(409, "Claude is already looking at this report.");
+      asking.add(entry.id);
+      let result;
+      try {
+        result = await suggestFix(entry.issue);
+      } finally {
+        asking.delete(entry.id);
+      }
       if (!result.ok) throw new HttpError(502, result.error.message);
       if (!analyzed.includes(entry)) throw new HttpError(409, CLEARED);
       entry.issue = withSuggestion(entry.issue, result.value);
