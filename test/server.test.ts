@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { request } from "node:http";
+import { createServer, request, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -237,5 +238,81 @@ echo '{"code":"x","message":"stand-in REA"}'; exit 1
       const entries = await readdir(join(tmpdir(), name)).catch((): string[] => []);
       assert.ok(!entries.includes(core) && !entries.includes(binary), "upload folders were not deleted");
     }
+  });
+});
+
+describe("crashlens serve --ai: Ask AI pressed twice", () => {
+  // The page hides "Ask AI" once its copy has a suggestion and goes busy while
+  // it waits, but busy only blocks the pointer: Enter on the focused button, or
+  // a second tab, sends another request for the same report.
+  let local: RunningServer;
+  let localPort: number;
+  const held: ServerResponse[] = [];
+  let calls = 0;
+  const api = createServer((req, res) => {
+    calls++;
+    req.resume();
+    req.on("end", () => held.push(res));
+  });
+  const env = { key: process.env["ANTHROPIC_API_KEY"], url: process.env["ANTHROPIC_BASE_URL"] };
+
+  before(async () => {
+    await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
+    process.env["ANTHROPIC_API_KEY"] = "test-key";
+    process.env["ANTHROPIC_BASE_URL"] = `http://127.0.0.1:${(api.address() as AddressInfo).port}`;
+    local = await serve({ port: 0, rea: { file: "rea", args: [] }, gdb: null, sourceRoot: null, ai: true });
+    localPort = Number(new URL(local.url).port);
+  });
+  after(async () => {
+    await local.close();
+    api.closeAllConnections();
+    api.close();
+    for (const [name, value] of [["ANTHROPIC_API_KEY", env.key], ["ANTHROPIC_BASE_URL", env.url]] as const)
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+
+  const send = (method: string, path: string, body = "") =>
+    new Promise<Reply>((resolve, reject) => {
+      const req = request(
+        { host: "127.0.0.1", port: localPort, method, path, headers: { Host: `127.0.0.1:${localPort}`, "X-Crashlens-Token": local.token } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+  const answer = (res: ServerResponse, text: string) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "msg_1", type: "message", role: "assistant", model: "claude-opus-5-5",
+      content: [{ type: "text", text }], stop_reason: "end_turn", stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 20 },
+    }));
+  };
+
+  it("sends a report to the API once and adds one suggestion", async () => {
+    const text = readFileSync(join(fixtures, "py-none.txt"), "utf8");
+    const { id } = JSON.parse((await send("POST", "/api/text", JSON.stringify({ text }))).body) as { id: string };
+    const until = async (done: () => boolean) => {
+      for (let i = 0; i < 250 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+    };
+    // First press: wait until its request is with the API.
+    const first = send("POST", "/api/ai", JSON.stringify({ id }));
+    await until(() => calls === 1);
+    assert.equal(calls, 1);
+    // Second press while the first is still waiting: either it is turned away,
+    // or it reaches the API too.
+    let secondDone = false;
+    const second = send("POST", "/api/ai", JSON.stringify({ id })).then((reply) => ((secondDone = true), reply));
+    await until(() => secondDone || calls === 2);
+    held.splice(0).forEach((res, i) => answer(res, `### What happened\nanswer ${i + 1}`));
+    const statuses = [(await first).status, (await second).status].sort();
+    const issues = (JSON.parse((await send("GET", "/api/state")).body) as { issues: { issue: { sections: { kind: string }[] } }[] }).issues;
+    const suggestions = issues[0]?.issue.sections.filter((s) => s.kind === "markdown").length;
+    assert.deepEqual({ calls, suggestions, statuses }, { calls: 1, suggestions: 1, statuses: [200, 409] });
   });
 });
