@@ -6217,17 +6217,21 @@ var APP_JS = String.raw`
 
 // src/server.ts
 var MAX_JSON_BYTES = MAX_TEXT_BYTES * 2;
+var CLEARED = "You pressed Clear all while this was being analyzed, so the report was not saved.";
 var DEFAULT_MAX_UPLOAD = 4 * 1024 * 1024 * 1024;
 async function serve(options) {
   const token = randomBytes(24).toString("hex");
   const uploadDir = await mkdtemp(join5(tmpdir(), "crashlens-"));
   const uploads = /* @__PURE__ */ new Map();
   const analyzed = [];
+  let generation = 0;
+  const inUse = /* @__PURE__ */ new Map();
   let sourceRoot = options.sourceRoot;
   const maxUpload = options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD;
   let port = options.port;
-  const finish = async (name, issue) => {
+  const finish = async (name, issue, started) => {
     const enriched = sourceRoot === null ? issue : await attachSource(issue, sourceRoot);
+    if (generation !== started) throw new HttpError(409, CLEARED);
     const entry = {
       id: randomUUID(),
       name,
@@ -6238,10 +6242,18 @@ async function serve(options) {
     analyzed.push(entry);
     return entry;
   };
-  const analyzeText2 = async (name, text) => {
+  const analyzeText2 = async (name, text, started) => {
     const parsed = parseFailure(text);
     if (!parsed.ok) throw new HttpError(422, parsed.error.message);
-    return finish(name, toFailureIssue(parsed.value, name, text));
+    return finish(name, toFailureIssue(parsed.value, name, text), started);
+  };
+  const remove = (upload) => rm(dirname4(upload.path), { recursive: true, force: true });
+  const hold = (upload) => inUse.set(upload.id, (inUse.get(upload.id) ?? 0) + 1);
+  const release = async (upload) => {
+    const count = (inUse.get(upload.id) ?? 1) - 1;
+    if (count > 0) return void inUse.set(upload.id, count);
+    inUse.delete(upload.id);
+    if (!uploads.has(upload.id)) await remove(upload);
   };
   const routes = {
     "GET /api/state": async () => ({
@@ -6251,12 +6263,14 @@ async function serve(options) {
       uploads: [...uploads.values()].map(({ path: _path, ...rest }) => rest)
     }),
     "POST /api/text": async (req) => {
+      const started = generation;
       const body2 = await readJson(req);
       const text = typeof body2["text"] === "string" ? body2["text"] : "";
       const name = typeof body2["name"] === "string" && body2["name"] !== "" ? body2["name"] : "pasted text";
-      return analyzeText2(name, text);
+      return analyzeText2(name, text, started);
     },
     "PUT /api/upload": async (req, url) => {
+      const started = generation;
       const name = (url.searchParams.get("name") ?? "upload").slice(0, 200);
       const id = randomUUID();
       const dir = join5(uploadDir, id);
@@ -6279,7 +6293,7 @@ async function serve(options) {
       const upload = { id, name, path, size: (await stat4(path)).size, kind };
       if (kind === "text") {
         try {
-          const result = await analyzeText2(name, await readFile4(path, "utf8"));
+          const result = await analyzeText2(name, await readFile4(path, "utf8"), started);
           return { upload: { id, name, size: upload.size, kind }, analyzed: result };
         } finally {
           await rm(dir, { recursive: true, force: true });
@@ -6289,12 +6303,21 @@ async function serve(options) {
       return { upload: { id, name, size: upload.size, kind } };
     },
     "POST /api/core": async (req) => {
+      const started = generation;
       const body2 = await readJson(req);
       const core = uploads.get(String(body2["core"]));
       const binary = uploads.get(String(body2["binary"]));
       if (core?.kind !== "core") throw new HttpError(400, "Upload a core dump first.");
       if (binary?.kind !== "binary") throw new HttpError(400, "Upload the binary that crashed.");
-      const result = await triage({ corePath: core.path, binaryPath: binary.path, rea: options.rea, gdb: options.gdb });
+      hold(core);
+      hold(binary);
+      let result;
+      try {
+        result = await triage({ corePath: core.path, binaryPath: binary.path, rea: options.rea, gdb: options.gdb });
+      } finally {
+        await release(core);
+        await release(binary);
+      }
       if (!result.ok) throw new HttpError(422, result.error.message);
       let issue = toCoreIssue(result.value);
       issue = {
@@ -6306,7 +6329,7 @@ async function serve(options) {
       };
       const log = typeof body2["log"] === "string" ? body2["log"] : "";
       if (log !== "") issue = withLog(issue, logContext(log, log.length));
-      return finish(core.name, issue);
+      return finish(core.name, issue, started);
     },
     "POST /api/source": async (req) => {
       const body2 = await readJson(req);
@@ -6328,14 +6351,17 @@ async function serve(options) {
       if (entry === void 0) throw new HttpError(404, "Unknown report.");
       const result = await suggestFix(entry.issue);
       if (!result.ok) throw new HttpError(502, result.error.message);
+      if (!analyzed.includes(entry)) throw new HttpError(409, CLEARED);
       entry.issue = withSuggestion(entry.issue, result.value);
       entry.markdown = renderIssueMarkdown(entry.issue);
       return entry;
     },
     "POST /api/clear": async () => {
+      generation++;
       analyzed.length = 0;
-      for (const upload of uploads.values()) await rm(dirname4(upload.path), { recursive: true, force: true });
+      const removed = [...uploads.values()];
       uploads.clear();
+      for (const upload of removed) if (!inUse.has(upload.id)) await remove(upload);
       return {};
     }
   };
