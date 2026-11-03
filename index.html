@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crashlens: live demo</title>
+<meta name="description" content="Find out why your program crashed. Paste a stack trace or panic and get a readable bug report, right in your browser.">
+<meta property="og:title" content="crashlens: why did it crash?">
+<meta property="og:description" content="Paste a stack trace, panic or sanitizer report and get a readable bug report. Runs in your browser.">
+<link rel="icon" href="data:,">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<link rel="stylesheet" href="app.css">
+<script src="crashlens.js" defer></script>
+<script src="demo.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark" aria-hidden="true"></span>crashlens</div>
+  <div class="tagline">Logs tell you where your program was. crashlens tells you why it died.</div>
+  <a class="local" href="https://github.com/mingleiw/crashlens">Runs in your browser · open source on GitHub</a>
+</header>
+<div class="demo-bar">
+  <b>Live demo</b>: the sample bugs below are real crashlens reports. Paste your own Python, Java, Node, Go or Rust stack trace, or an ASan report: it is analyzed right here in your browser and never uploaded.
+  <a href="https://github.com/mingleiw/crashlens#install">Get crashlens</a> for core dumps, your source code and live log watching.
+</div>
+<main class="layout">
+  <aside class="side">
+    <section class="card drop" id="drop" tabindex="0" aria-label="Drop crash files here">
+      <div class="drop-title">Drop a crash here</div>
+      <div class="drop-sub">A log with a panic or exception, a sanitizer report, or a core dump with its binary</div>
+      <label class="btn secondary">Choose files<input type="file" id="files" multiple hidden></label>
+      <div class="sample"><button type="button" id="sampleCore" class="btn secondary">Try a sample core dump</button>
+      <div class="hint">A real crash of a <a href="sample/parser.c">small C program</a>. The report was made from its core dump by crashlens and REA ahead of time; the dump itself stays offline.</div></div>
+      <div id="pending" class="pending" hidden>
+        <div id="pendingText"></div>
+        <textarea id="coreLog" rows="3" placeholder="Optional: paste the app's log so the report shows what it was doing"></textarea>
+        <button id="analyzeCore" class="btn" disabled>Analyze core dump</button>
+      </div>
+    </section>
+    <section class="card">
+      <textarea id="text" rows="7" spellcheck="false" placeholder="…or paste a stack trace, panic, traceback or log here"></textarea>
+      <div class="row end"><button id="analyze" class="btn">Analyze</button></div>
+    </section>
+    <section class="card" id="sourceCard">
+      <label class="label" for="source">Your source code <span class="muted">(optional)</span></label>
+      <div class="row"><input id="source" placeholder="/absolute/path/to/your/repo" spellcheck="false"><button id="setSource" class="btn secondary">Set</button></div>
+      <div class="hint" id="sourceHint">Shows the failing lines and who last changed them.</div>
+    </section>
+    <section class="bugs">
+      <div class="bugs-head"><h2>Bugs</h2><button id="clear" class="link" hidden>Clear all</button></div>
+      <ol id="bugs" class="bug-list"></ol>
+      <p id="empty" class="hint">Nothing analyzed yet.</p>
+    </section>
+  </aside>
+  <section class="detail" id="detail" aria-live="polite">
+    <div class="welcome">
+      <h1>What crashed?</h1>
+      <p>Drop or paste any of these and crashlens explains where it failed and why, pointing at your code first.</p>
+      <ul class="inputs">
+        <li><b>Go / Rust</b> panics</li>
+        <li><b>Python</b> tracebacks</li>
+        <li><b>Java</b> stack traces</li>
+        <li><b>Node.js</b> errors</li>
+        <li><b>ASan / UBSan</b> reports</li>
+        <li><b>Linux core dumps</b> + binary</li>
+      </ul>
+      <p class="muted">Logs printed before the failure are shown too, so you can see which request or order triggered it. The same bug from many files is grouped together.</p>
+    </div>
+  </section>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
