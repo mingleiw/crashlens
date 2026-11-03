@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -132,5 +132,110 @@ describe("crashlens serve: analysis", () => {
     await call("POST", "/api/clear");
     const state = JSON.parse((await call("GET", "/api/state")).body) as { issues: unknown[]; uploads: unknown[] };
     assert.deepEqual([state.issues.length, state.uploads.length], [0, 0]);
+  });
+});
+
+describe("crashlens serve: Clear all during a request", () => {
+  // Clear all can arrive while a request runs: from the keyboard (the busy
+  // overlay only blocks the pointer) or from a second tab on the same URL.
+  let work: string;
+  let local: RunningServer;
+  let localPort: number;
+
+  before(async () => {
+    work = await mkdtemp(join(tmpdir(), "crashlens-test-"));
+    // Stands in for REA: says it started, waits for the test, then records whether the core is still there.
+    const rea = join(work, "rea.sh");
+    await writeFile(
+      rea,
+      `#!/bin/sh
+case "$1" in inspect-recorded-crash) ;; *) echo '{"code":"x","message":"not a crash"}'; exit 1;; esac
+: > "${work}/started"
+i=0; while [ ! -e "${work}/go" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+if [ -e "$2" ]; then echo present > "${work}/saw"; else echo gone > "${work}/saw"; fi
+echo '{"code":"x","message":"stand-in REA"}'; exit 1
+`,
+      { mode: 0o755 },
+    );
+    local = await serve({ port: 0, rea: { file: rea, args: [] }, gdb: null, sourceRoot: null });
+    localPort = Number(new URL(local.url).port);
+  });
+  after(async () => {
+    await local.close();
+    await rm(work, { recursive: true, force: true });
+  });
+
+  /** Sends the headers and part of the body now; `finish()` sends the rest and waits for the reply. */
+  function open(method: string, path: string, body: Buffer | string = "") {
+    const data = Buffer.from(body);
+    let reply!: Promise<Reply>;
+    const req = request({
+      host: "127.0.0.1",
+      port: localPort,
+      method,
+      path,
+      headers: { Host: `127.0.0.1:${localPort}`, "X-Crashlens-Token": local.token, "Content-Length": data.length },
+    });
+    reply = new Promise((resolve, reject) => {
+      req.on("response", (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+    });
+    const half = Math.floor(data.length / 2);
+    req.write(data.subarray(0, half));
+    req.flushHeaders();
+    return {
+      finish: () => {
+        req.end(data.subarray(half));
+        return reply;
+      },
+    };
+  }
+  const send = (method: string, path: string, body: Buffer | string = "") => open(method, path, body).finish();
+  const state = async () =>
+    JSON.parse((await send("GET", "/api/state")).body) as { issues: unknown[]; uploads: unknown[] };
+  const until = async (file: string) => {
+    for (let i = 0; i < 400 && !existsSync(file); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(existsSync(file), `timed out waiting for ${file}`);
+  };
+
+  it("does not bring back a report pasted before Clear all", async () => {
+    const text = readFileSync(join(fixtures, "py-none.txt"), "utf8");
+    const paste = open("POST", "/api/text", JSON.stringify({ text }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await send("POST", "/api/clear")).status, 200);
+    const reply = await paste.finish();
+    assert.equal(reply.status, 409);
+    assert.match(JSON.parse(reply.body).error, /Clear all/);
+    assert.equal((await state()).issues.length, 0);
+  });
+
+  it("keeps a core and binary on disk until the analysis using them finishes", async () => {
+    const elf = (type: number) => {
+      const b = Buffer.alloc(64);
+      b.writeUInt32BE(0x7f454c46, 0);
+      b.writeUInt16LE(type, 16);
+      return b;
+    };
+    const upload = async (name: string, type: number) =>
+      (JSON.parse((await send("PUT", `/api/upload?name=${name}`, elf(type))).body) as { upload: { id: string } }).upload.id;
+    const binary = await upload("app", 3);
+    const core = await upload("core", 4);
+    const analysis = send("POST", "/api/core", JSON.stringify({ core, binary }));
+    await until(join(work, "started"));
+    assert.equal((await send("POST", "/api/clear")).status, 200);
+    assert.deepEqual((await state()).uploads, []);
+    await writeFile(join(work, "go"), "");
+    await analysis;
+    assert.equal(readFileSync(join(work, "saw"), "utf8").trim(), "present");
+    // Released after the analysis: nothing is left in the private folder.
+    const folder = (await readdir(tmpdir())).filter((n) => n.startsWith("crashlens-") && !n.startsWith("crashlens-test-"));
+    for (const name of folder) {
+      const entries = await readdir(join(tmpdir(), name)).catch((): string[] => []);
+      assert.ok(!entries.includes(core) && !entries.includes(binary), "upload folders were not deleted");
+    }
   });
 });
