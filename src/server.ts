@@ -50,6 +50,7 @@ interface Analyzed {
 }
 
 const MAX_JSON_BYTES = MAX_TEXT_BYTES * 2;
+const CLEARED = "You pressed Clear all while this was being analyzed, so the report was not saved.";
 const DEFAULT_MAX_UPLOAD = 4 * 1024 * 1024 * 1024;
 
 /**
@@ -63,12 +64,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const uploadDir = await mkdtemp(join(tmpdir(), "crashlens-"));
   const uploads = new Map<string, Upload>();
   const analyzed: Analyzed[] = [];
+  // Clear all can arrive while a request is still running (from the keyboard
+  // or a second tab). Each Clear starts a new generation: a result from an
+  // older one is not saved, and uploads in use are deleted only when released.
+  let generation = 0;
+  const inUse = new Map<string, number>();
   let sourceRoot = options.sourceRoot;
   const maxUpload = options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD;
   let port = options.port;
 
-  const finish = async (name: string, issue: Issue): Promise<Analyzed> => {
+  const finish = async (name: string, issue: Issue, started: number): Promise<Analyzed> => {
     const enriched = sourceRoot === null ? issue : await attachSource(issue, sourceRoot);
+    if (generation !== started) throw new HttpError(409, CLEARED);
     const entry: Analyzed = {
       id: randomUUID(),
       name,
@@ -80,10 +87,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     return entry;
   };
 
-  const analyzeText = async (name: string, text: string) => {
+  const analyzeText = async (name: string, text: string, started: number) => {
     const parsed = parseFailure(text);
     if (!parsed.ok) throw new HttpError(422, parsed.error.message);
-    return finish(name, toFailureIssue(parsed.value, name, text));
+    return finish(name, toFailureIssue(parsed.value, name, text), started);
+  };
+
+  const remove = (upload: Upload) => rm(dirname(upload.path), { recursive: true, force: true });
+  const hold = (upload: Upload) => inUse.set(upload.id, (inUse.get(upload.id) ?? 0) + 1);
+  /** Ends one use; an upload that Clear all removed meanwhile is deleted now. */
+  const release = async (upload: Upload) => {
+    const count = (inUse.get(upload.id) ?? 1) - 1;
+    if (count > 0) return void inUse.set(upload.id, count);
+    inUse.delete(upload.id);
+    if (!uploads.has(upload.id)) await remove(upload);
   };
 
   const routes: Record<string, (req: IncomingMessage, url: URL) => Promise<unknown>> = {
@@ -94,12 +111,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       uploads: [...uploads.values()].map(({ path: _path, ...rest }) => rest),
     }),
     "POST /api/text": async (req) => {
+      const started = generation;
       const body = await readJson(req);
       const text = typeof body["text"] === "string" ? body["text"] : "";
       const name = typeof body["name"] === "string" && body["name"] !== "" ? body["name"] : "pasted text";
-      return analyzeText(name, text);
+      return analyzeText(name, text, started);
     },
     "PUT /api/upload": async (req, url) => {
+      const started = generation;
       const name = (url.searchParams.get("name") ?? "upload").slice(0, 200);
       const id = randomUUID();
       // Keep the original file name: core dumps record the binary by name,
@@ -125,7 +144,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // Text logs are analyzed right away and never kept; cores wait for their binary.
       if (kind === "text") {
         try {
-          const result = await analyzeText(name, await readFile(path, "utf8"));
+          const result = await analyzeText(name, await readFile(path, "utf8"), started);
           return { upload: { id, name, size: upload.size, kind }, analyzed: result };
         } finally {
           await rm(dir, { recursive: true, force: true });
@@ -135,12 +154,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       return { upload: { id, name, size: upload.size, kind } };
     },
     "POST /api/core": async (req) => {
+      const started = generation;
       const body = await readJson(req);
       const core = uploads.get(String(body["core"]));
       const binary = uploads.get(String(body["binary"]));
       if (core?.kind !== "core") throw new HttpError(400, "Upload a core dump first.");
       if (binary?.kind !== "binary") throw new HttpError(400, "Upload the binary that crashed.");
-      const result = await triage({ corePath: core.path, binaryPath: binary.path, rea: options.rea, gdb: options.gdb });
+      hold(core);
+      hold(binary);
+      let result;
+      try {
+        result = await triage({ corePath: core.path, binaryPath: binary.path, rea: options.rea, gdb: options.gdb });
+      } finally {
+        await release(core);
+        await release(binary);
+      }
       if (!result.ok) throw new HttpError(422, result.error.message);
       let issue = toCoreIssue(result.value);
       // Show the names the user uploaded, not the private temp paths.
@@ -153,7 +181,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       };
       const log = typeof body["log"] === "string" ? body["log"] : "";
       if (log !== "") issue = withLog(issue, logContext(log, log.length));
-      return finish(core.name, issue);
+      return finish(core.name, issue, started);
     },
     "POST /api/source": async (req) => {
       const body = await readJson(req);
@@ -175,14 +203,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (entry === undefined) throw new HttpError(404, "Unknown report.");
       const result = await suggestFix(entry.issue);
       if (!result.ok) throw new HttpError(502, result.error.message);
+      if (!analyzed.includes(entry)) throw new HttpError(409, CLEARED);
       entry.issue = withSuggestion(entry.issue, result.value);
       entry.markdown = renderIssueMarkdown(entry.issue);
       return entry;
     },
     "POST /api/clear": async () => {
+      generation++;
       analyzed.length = 0;
-      for (const upload of uploads.values()) await rm(dirname(upload.path), { recursive: true, force: true });
+      const removed = [...uploads.values()];
       uploads.clear();
+      // An analysis still reading an upload deletes it when it finishes (release).
+      for (const upload of removed) if (!inUse.has(upload.id)) await remove(upload);
       return {};
     },
   };
