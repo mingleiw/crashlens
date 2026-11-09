@@ -1,0 +1,157 @@
+<title>Software Factory X Article</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: sticky copy bar over a single readable article column */
+:root{--bg:#fbfbfa;--fg:#16181c;--muted:#5b6470;--line:#e3e5e8;--accent:#1d9bf0;--accent-fg:#fff;--ok:#0f8a4a;
+--body:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101214;--fg:#e8eaed;--muted:#9aa3ad;--line:#2a2e33;--accent:#3aa8f2;--accent-fg:#06121c;--ok:#3ccf82;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#101214;--fg:#e8eaed;--muted:#9aa3ad;--line:#2a2e33;--accent:#3aa8f2;--accent-fg:#06121c;--ok:#3ccf82;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:16px;line-height:1.6}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
+padding-block:12px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.bar-in{max-width:680px;margin:0 auto;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{font:600 15px/1 var(--body);border-radius:999px;padding:12px 20px;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--fg)}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{font-size:14px;color:var(--ok);min-height:1em}
+.wrap{padding-block:24px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:680px;margin:0 auto}
+.label{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+h1{font-size:30px;line-height:1.2;margin:0 0 24px;text-wrap:balance}
+#article h2{font-size:22px;margin:36px 0 8px;text-wrap:balance}
+#article a{color:var(--accent);word-break:break-all}
+#article li{margin:4px 0}
+.steps{color:var(--muted);font-size:14px;margin:8px 0 0;flex-basis:100%}
+</style>
+<div class="bar"><div class="bar-in">
+<button class="primary" id="copy-article">Copy article</button>
+<button id="copy-title">Copy title</button>
+<span class="status" id="status" role="status"></span>
+<p class="steps">Paste the title into X's title field, then paste the article into the body. Headings, bold, lists and links come along.</p>
+</div></div>
+<div class="wrap"><main>
+<p class="label">Title</p>
+<h1 id="title">The Software Factory: What's Real and What I'd Actually Build</h1>
+<p class="label">Article</p>
+<div id="article">
+<p><i>Issue #2 of a series where I read the popular pitches, build guides, and rebuttals on a topic, check what holds up, and keep only what's worth using. This one: the software factory.</i></p>
+<p>My coding agent missed two race conditions. Model checking caught them.</p>
+<p>That shapes how I read every software factory pitch. Show me the code getting produced, sure. Then show me what catches a wrong answer before it ships.</p>
+<p>I went through the funding announcements, the overnight build recipes, and the arguments over whether "software factory" means anything at all.</p>
+<p>There are real products here and useful engineering ideas. There are also claims that go well past the evidence attached to them.</p>
+<p>Here's what I'd keep.</p>
+
+<h2>First, separate the company from the concept</h2>
+<p>"Software factory" gets used for three different things.</p>
+<p><b>The company.</b> Factory sells coding agents called Droids. Its September announcement confirmed a $200 million raise at a $5 billion valuation and reported hundreds of thousands of developers on the platform. (factory.com)</p>
+<p><b>The platform pitch.</b> A computer that produces software on demand. Microsoft's local coding model is a real piece of that story. Its documentation describes free local inference alongside cloud models, with more than 120GB of RAM recommended for best performance. That's a much narrower proposition than an "infinite software factory" on every desk. (microsoft.ai)</p>
+<p><b>The workflow.</b> What engineers can build themselves: take a task, give an agent an isolated workspace, run checks, and decide whether the result can merge.</p>
+<p>These overlap, but evidence for one doesn't prove the others. A funding round tells me someone financed a company. A local model tells me where inference happens. Neither tells me whether an unattended workflow reliably ships useful changes.</p>
+
+<h2>There is evidence. Check what it measures.</h2>
+<p>Factory publishes customer results. Its Nav case study reports feature development cycles twice as fast and less context switching. Those are relevant claims, and calling them "no evidence" would be unfair. (factory.com)</p>
+<p>But a vendor-published customer story leaves questions open:</p>
+<ul>
+<li>Which tasks improved?</li>
+<li>How was the baseline measured?</li>
+<li>How much human work remained?</li>
+<li>Did defects go up?</li>
+<li>Did the gains last beyond the initial rollout?</li>
+</ul>
+<p>Those details decide whether the result applies to my team.</p>
+<p>The same standard applies to DIY builds. A detailed recipe can be worth trying without proving it delivers working products overnight. A screenshot of a finished interface shows something. It doesn't show operating cost, reliability, or how much cleanup happened afterward.</p>
+<p>I separate three claims:</p>
+<ul>
+<li><b>It exists:</b> there's a system or product someone can inspect.</li>
+<li><b>It helped:</b> there's a reported improvement on a defined task.</li>
+<li><b>It works reliably:</b> repeated runs, with the failures, costs, and human intervention counted.</li>
+</ul>
+<p>The debate slides between these three far too easily.</p>
+
+<h2>StrongDM gets to the interesting problem</h2>
+<p>StrongDM's approach is deliberately aggressive: humans don't write or review the generated code.</p>
+<p>That sounds like removing the checks. Their write-up describes a lot of work building different ones:</p>
+<ul>
+<li>Agents took shortcuts to pass tests, so they store test scenarios outside the codebase, partly so tests can't be rewritten to match the implementation.</li>
+<li>They built behavioral replicas of services like Okta and Slack, so agents can be evaluated across many scenarios.</li>
+<li>Some evaluation uses LLM judgment instead of a simple pass/fail assertion.</li>
+</ul>
+<p>They've also shipped software, including CXDB, an open-source context store for agents. That's more than a blog post about an imaginary pipeline. (factory.strongdm.ai)</p>
+<p>The open questions are about the checks themselves: how well the scenarios cover real use, how faithfully the replicas behave, and how often the evaluator accepts a bad result.</p>
+<p>Those are the questions I'd spend my time on.</p>
+
+<h2>The failure I care about</h2>
+<p>A factory can keep running while its definition of "working" drifts.</p>
+<p>The agent implements the wrong behavior. A test checks the same wrong assumption. Everything passes. The next task starts.</p>
+<p>Adding another agent doesn't fix this. Two agents can agree on the same wrong reading.</p>
+<p>Making a check deterministic doesn't fix it either. A test can reliably assert the wrong thing.</p>
+<p>My race-condition example matters because a different kind of check caught what the coding agent missed. Model checking has limits too: TLC checks a TLA+ model, and you still have to show that the model matches the implementation. (lamport.azurewebsites.net)</p>
+<p>The lesson I take from that run is practical: <b>give the workflow a way to prove its own answer wrong.</b></p>
+
+<h2>What I'd actually build</h2>
+<p>I'd start with one repository and a narrow class of changes whose behavior I can test.</p>
+<p><b>1. Define success before anyone writes code.</b></p>
+<p>Write down the expected behavior, constraints, and failure cases, and review them before the agent starts. If they need to change later, that's an explicit decision, not a quiet edit.</p>
+<p><b>2. Give the builder an isolated workspace.</b></p>
+<p>The agent gets a branch or worktree and the tools the task needs. Its permissions shouldn't let it bypass merge rules or quietly weaken the acceptance checks.</p>
+<p>Markdown instructions can explain the rules. Permissions and CI have to enforce them.</p>
+<p><b>3. Check behavior and keep the evidence.</b></p>
+<p>Run the relevant tests, static checks, and end-to-end scenarios, and attach the actual results to the change.</p>
+<p>An agent saying "all tests passed" is a report. I want the output from the tests that ran.</p>
+<p><b>4. Test the checks.</b></p>
+<p>Introduce a known-bad change and confirm the gate rejects it.</p>
+<p>If the workflow claims to prevent duplicate processing, trigger duplicate processing on purpose. If it claims to preserve permissions, try an operation that should be denied.</p>
+<p>Watching the gate reject a realistic failure tells me more than another successful demo.</p>
+<p><b>5. Keep merge approval while you measure.</b></p>
+<p>At first, the agent produces a reviewed proposal. I'd consider automatic merging only for narrow categories of change, after collecting evidence that the checks work.</p>
+<p>Failed checks, changed acceptance criteria, and exhausted retry budgets go back to a human.</p>
+
+<h2>The numbers I'd want</h2>
+<p>For a defined set of tasks, I'd track:</p>
+<ul>
+<li>Accepted changes out of all attempted tasks.</li>
+<li>Human minutes spent reviewing and repairing them.</li>
+<li>Total cost per accepted change, including failed attempts.</li>
+<li>Defects found after merge.</li>
+<li>Changes that needed a rollback.</li>
+</ul>
+<p>Then compare them with the previous workflow on comparable work.</p>
+<p>A system that produces more code while increasing repair work hasn't shown a productivity gain. A system that reliably removes tedious work can be valuable without building a whole product overnight.</p>
+
+<h2>The rule</h2>
+<p>I'd happily use the useful parts: isolated execution, clear acceptance criteria, protected checks, and evidence attached to every change.</p>
+<p><b>Before I let it merge while I sleep, I want to watch it stop something that should never ship.</b></p>
+
+<h2>Sources</h2>
+<ul>
+<li>Factory: $200M raise announcement and Nav case study: <a href="https://factory.com">factory.com</a></li>
+<li>Microsoft: local coding model documentation: <a href="https://microsoft.ai">microsoft.ai</a></li>
+<li>StrongDM: software factory write-up and CXDB: <a href="https://factory.strongdm.ai">factory.strongdm.ai</a></li>
+<li>Leslie Lamport: TLA+ and the TLC model checker: <a href="https://lamport.azurewebsites.net">lamport.azurewebsites.net</a></li>
+</ul>
+
+</div>
+</main></div>
+<script>
+const statusEl=document.getElementById('status');
+function say(t){statusEl.textContent=t;clearTimeout(say.t);say.t=setTimeout(()=>statusEl.textContent='',3000)}
+function selectEl(el){const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r)}
+async function copyRich(el,name){
+  const html=el.innerHTML, text=el.innerText;
+  try{
+    if(window.ClipboardItem&&navigator.clipboard&&navigator.clipboard.write){
+      await navigator.clipboard.write([new ClipboardItem({'text/html':new Blob([html],{type:'text/html'}),'text/plain':new Blob([text],{type:'text/plain'})})]);
+      say(name+' copied');return;
+    }
+  }catch(e){}
+  selectEl(el);
+  try{ if(document.execCommand('copy')){say(name+' copied');return;} }catch(e){}
+  say('Selected. Press Ctrl/Cmd+C to copy.');
+}
+document.getElementById('copy-article').addEventListener('click',()=>copyRich(document.getElementById('article'),'Article'));
+document.getElementById('copy-title').addEventListener('click',async()=>{
+  const t=document.getElementById('title').textContent;
+  try{await navigator.clipboard.writeText(t);say('Title copied')}catch(e){selectEl(document.getElementById('title'));say('Selected. Press Ctrl/Cmd+C to copy.')}
+});
+</script>
