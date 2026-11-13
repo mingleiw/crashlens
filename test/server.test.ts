@@ -5,7 +5,7 @@ import { createServer, request, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { serve, type RunningServer } from "../src/server.js";
 
@@ -241,7 +241,7 @@ echo '{"code":"x","message":"stand-in REA"}'; exit 1
   });
 });
 
-describe("crashlens serve --ai: Ask AI pressed twice", () => {
+describe("crashlens serve --ai: Ask AI", () => {
   // The page hides "Ask AI" once its copy has a suggestion and goes busy while
   // it waits, but busy only blocks the pointer: Enter on the focused button, or
   // a second tab, sends another request for the same report.
@@ -262,6 +262,11 @@ describe("crashlens serve --ai: Ask AI pressed twice", () => {
     process.env["ANTHROPIC_BASE_URL"] = `http://127.0.0.1:${(api.address() as AddressInfo).port}`;
     local = await serve({ port: 0, rea: { file: "rea", args: [] }, gdb: null, sourceRoot: null, ai: true });
     localPort = Number(new URL(local.url).port);
+  });
+  beforeEach(async () => {
+    await send("POST", "/api/clear");
+    calls = 0;
+    held.length = 0;
   });
   after(async () => {
     await local.close();
@@ -293,26 +298,75 @@ describe("crashlens serve --ai: Ask AI pressed twice", () => {
       usage: { input_tokens: 10, output_tokens: 20 },
     }));
   };
-
-  it("sends a report to the API once and adds one suggestion", async () => {
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 250 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  const newReport = async () => {
     const text = readFileSync(join(fixtures, "py-none.txt"), "utf8");
-    const { id } = JSON.parse((await send("POST", "/api/text", JSON.stringify({ text }))).body) as { id: string };
-    const until = async (done: () => boolean) => {
-      for (let i = 0; i < 250 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
-    };
+    return (JSON.parse((await send("POST", "/api/text", JSON.stringify({ text }))).body) as { id: string }).id;
+  };
+  const ask = (id: string) => send("POST", "/api/ai", JSON.stringify({ id }));
+  const reports = async () =>
+    (JSON.parse((await send("GET", "/api/state")).body) as { issues: { issue: { sections: { kind: string }[] } }[] }).issues;
+  const suggestions = async () => (await reports())[0]?.issue.sections.filter((s) => s.kind === "markdown").length;
+
+  it("sends a report to the API once when asked twice at the same time", async () => {
+    const id = await newReport();
     // First press: wait until its request is with the API.
-    const first = send("POST", "/api/ai", JSON.stringify({ id }));
+    const first = ask(id);
     await until(() => calls === 1);
     assert.equal(calls, 1);
     // Second press while the first is still waiting: either it is turned away,
     // or it reaches the API too.
     let secondDone = false;
-    const second = send("POST", "/api/ai", JSON.stringify({ id })).then((reply) => ((secondDone = true), reply));
+    const second = ask(id).then((reply) => ((secondDone = true), reply));
     await until(() => secondDone || calls === 2);
     held.splice(0).forEach((res, i) => answer(res, `### What happened\nanswer ${i + 1}`));
     const statuses = [(await first).status, (await second).status].sort();
-    const issues = (JSON.parse((await send("GET", "/api/state")).body) as { issues: { issue: { sections: { kind: string }[] } }[] }).issues;
-    const suggestions = issues[0]?.issue.sections.filter((s) => s.kind === "markdown").length;
-    assert.deepEqual({ calls, suggestions, statuses }, { calls: 1, suggestions: 1, statuses: [200, 409] });
+    assert.deepEqual({ calls, suggestions: await suggestions(), statuses }, { calls: 1, suggestions: 1, statuses: [200, 409] });
+  });
+
+  it("does not ask again for a report that already has a suggestion", async () => {
+    // A second tab loaded before the answer arrived still shows the button.
+    const id = await newReport();
+    const first = ask(id);
+    await until(() => calls === 1);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 1"));
+    assert.equal((await first).status, 200);
+    let laterDone = false;
+    const later = ask(id).then((reply) => ((laterDone = true), reply));
+    await until(() => laterDone || calls === 2);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 2"));
+    const reply = await later;
+    assert.deepEqual({ calls, suggestions: await suggestions(), status: reply.status }, { calls: 1, suggestions: 1, status: 409 });
+    assert.match(JSON.parse(reply.body).error, /already has an AI suggestion/);
+  });
+
+  it("lets you ask again after the API call failed", async () => {
+    const id = await newReport();
+    const failed = ask(id);
+    await until(() => calls === 1);
+    held.splice(0).forEach((res) =>
+      res.writeHead(400, { "Content-Type": "application/json" }).end(
+        JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "bad request" } }),
+      ),
+    );
+    assert.equal((await failed).status, 502);
+    const retry = ask(id);
+    await until(() => calls === 2);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer"));
+    assert.deepEqual({ status: (await retry).status, calls, suggestions: await suggestions() }, { status: 200, calls: 2, suggestions: 1 });
+  });
+
+  it("drops the answer when Clear all ran while Claude was answering", async () => {
+    const id = await newReport();
+    const pending = ask(id);
+    await until(() => calls === 1);
+    assert.equal((await send("POST", "/api/clear")).status, 200);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 1"));
+    const reply = await pending;
+    assert.equal(reply.status, 409);
+    assert.match(JSON.parse(reply.body).error, /Clear all/);
+    assert.deepEqual(await reports(), []);
   });
 });
