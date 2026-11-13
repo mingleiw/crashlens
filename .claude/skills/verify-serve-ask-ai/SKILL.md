@@ -16,13 +16,15 @@ while the page is busy, because busy only blocks the pointer):
 - **OneApiCall**: a report is sent to the Anthropic API at most once. Harm if
   broken: the user pays for the same answer twice.
 
-The model also covers Clear all while a request is out (the reply is dropped
-with 409, `analyzed.includes(entry)`) and a tab reloading (`GET /api/state`).
+The model includes Clear all while a request is out, and a tab reloading
+(`GET /api/state`), but no rule depends on the `analyzed.includes(entry)`
+check: removing it keeps the check green. Only the test "drops the answer when
+Clear all ran while Claude was answering" holds that check.
 
-Not covered: two different reports, the API failing and the user retrying
-(that resets `asking`, and a retry is allowed), what the model's answer says,
-and anything outside these routes. A pass covers this model at these bounds,
-not the whole server.
+Not covered by the model: two different reports, the API failing and the user
+retrying (a test covers the retry), what the model's answer says, and anything
+outside these routes. A pass covers this model at these bounds, not the whole
+server.
 
 ## Run it
 
@@ -42,14 +44,14 @@ confirm", "Claude answers"), and draws the chart.
 
 ## Coverage record
 
-Last confirmed that the model describes the code at commit **f19c7a5**.
+Last confirmed that the model describes the code at commit **01f0b8c**.
 
 | Model (`verification/serve-ai/AskAi.tla`) | Code |
 | --- | --- |
 | `Press(t)`: checks, then `asking` + 1, `calls` + 1 | `src/server.ts` route `"POST /api/ai"`, from the start up to `await suggestFix(entry.issue)`: the 404 for an unlisted report, the 409 for an existing suggestion (`sections.some(kind === "markdown")`), the 409 for `asking.has(entry.id)`, then `asking.add` |
 | `Reply(t)`: `asking` - 1, then a suggestion only if still listed | the same route after `suggestFix` returns: `finally { asking.delete }`, the `analyzed.includes(entry)` 409, `entry.issue = withSuggestion(...)` |
 | `Clear(t)`: `listed` becomes FALSE | `src/server.ts` route `"POST /api/clear"` (`analyzed.length = 0`) |
-| `Reload(t)` | `src/server.ts` route `"GET /api/state"`, and `load()` in `src/web/page.ts` |
+| `Reload(t)` | `src/server.ts` route `"GET /api/state"`, and `load()` in `src/web/page.ts` (also called after a failed ask) |
 | `shows[t] = "noAI"` guard on `Press` | `src/web/page.ts`: `var hasAi = ...` and `if (state.aiEnabled && !hasAi)` around the button |
 | keyboard press while busy (`MaxPresses = 2` per tab) | `src/web/page.ts`: `.busy { pointer-events: none }` only blocks the pointer |
 
@@ -57,12 +59,21 @@ Each `Press` and `Reply` is one atomic step because Node runs the route
 without interruption between its `await`s; `readJson` comes before any check
 and changes nothing, so it is folded into `Press`.
 
-The replay of the shortest failing path against the real server is the test
-"crashlens serve --ai: Ask AI pressed twice" in `test/server.test.ts`.
+Each guard in the route has a test in `test/server.test.ts`, describe
+"crashlens serve --ai: Ask AI", that fails when that guard alone is removed:
+
+| Guard in `src/server.ts` | Test |
+| --- | --- |
+| `asking.has(entry.id)` 409, and `asking.add` | "sends a report to the API once when asked twice at the same time" |
+| existing suggestion 409 (`sections.some(kind === "markdown")`) | "does not ask again for a report that already has a suggestion" |
+| `finally { asking.delete }` | "lets you ask again after the API call failed" |
+| `analyzed.includes(entry)` 409 | "drops the answer when Clear all ran while Claude was answering" |
+
+When you add or change a guard, break it alone and check that a test fails.
 
 ## When a change touches the covered code
 
-1. Run `git diff f19c7a5 -- src/server.ts src/web/page.ts` and read the
+1. Run `git diff 01f0b8c -- src/server.ts src/web/page.ts` and read the
    covered parts named above.
 2. If the behavior the table describes changed, change the matching action in
    `AskAi.tla` so the model says what the code now does. Keep each atomic step
