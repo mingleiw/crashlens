@@ -299,7 +299,14 @@ export const APP_JS = String.raw`
           state.issues = state.issues.map(function (e) { return e.id === updated.id ? updated : e; });
           state.selected = updated;
           render();
-        }, function (err) { toast(err.message, true); }).then(function () { busy(false); });
+        }, function (err) {
+          toast(err.message, true);
+          // Another tab may have added a suggestion (409) or cleared the list: show the server's copy.
+          return load().then(function () {
+            state.selected = state.issues.filter(function (e) { return e.id === entry.id; })[0] || null;
+            render();
+          });
+        }).then(function () { busy(false); });
       });
       actions.appendChild(ask);
     }

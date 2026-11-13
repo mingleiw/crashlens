@@ -69,6 +69,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // older one is not saved, and uploads in use are deleted only when released.
   let generation = 0;
   const inUse = new Map<string, number>();
+  // Reports with an "Ask AI" request waiting for the API. The page hides the
+  // button once it has a suggestion, but Enter while busy or a second tab can
+  // still ask again; each ask is a paid call and would append another suggestion.
+  const asking = new Set<string>();
   let sourceRoot = options.sourceRoot;
   const maxUpload = options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD;
   let port = options.port;
@@ -201,7 +205,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const body = await readJson(req);
       const entry = analyzed.find((a) => a.id === body["id"]);
       if (entry === undefined) throw new HttpError(404, "Unknown report.");
-      const result = await suggestFix(entry.issue);
+      if (entry.issue.sections.some((s) => s.kind === "markdown"))
+        throw new HttpError(409, "This report already has an AI suggestion.");
+      if (asking.has(entry.id)) throw new HttpError(409, "Claude is already looking at this report.");
+      asking.add(entry.id);
+      let result;
+      try {
+        result = await suggestFix(entry.issue);
+      } finally {
+        asking.delete(entry.id);
+      }
       if (!result.ok) throw new HttpError(502, result.error.message);
       if (!analyzed.includes(entry)) throw new HttpError(409, CLEARED);
       entry.issue = withSuggestion(entry.issue, result.value);
