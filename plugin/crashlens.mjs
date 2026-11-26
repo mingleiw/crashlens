@@ -2572,15 +2572,7 @@ function parseFrame(line) {
   const placed = FRAME_PLACE.exec(rest);
   const call = placed?.[1] ?? rest;
   if (!call.endsWith(")")) return [];
-  let depth = 0;
-  let open3 = -1;
-  for (let i = call.length - 1; i >= 0; i--) {
-    if (call[i] === ")") depth++;
-    else if (call[i] === "(" && --depth === 0) {
-      open3 = i;
-      break;
-    }
-  }
+  const open3 = argumentListStart(call);
   const name = open3 <= 0 ? "" : call.slice(0, open3).trim();
   if (name === "") return [];
   return [
@@ -2591,6 +2583,29 @@ function parseFrame(line) {
       source: placed?.[2] ?? null
     }
   ];
+}
+function argumentListStart(call) {
+  let depth = 0;
+  let quote = null;
+  let start = -1;
+  let last = -1;
+  for (let i = 0; i < call.length; i++) {
+    const c2 = call[i];
+    if (quote !== null) {
+      if (c2 === "\\") i++;
+      else if (c2 === quote) quote = null;
+    } else if ((c2 === '"' || c2 === "'") && depth > 0) quote = c2;
+    else if (c2 === "(") {
+      if (depth++ === 0) start = i;
+    } else if (c2 === ")" && depth > 0 && --depth === 0 && i === call.length - 1) last = start;
+  }
+  if (quote === null && depth === 0) return last;
+  depth = 0;
+  for (let i = call.length - 1; i >= 0; i--) {
+    if (call[i] === ")") depth++;
+    else if (call[i] === "(" && --depth === 0) return i;
+  }
+  return -1;
 }
 var INSTRUCTION = /^(=>)?\s*(0x[0-9a-f]+)(?: <[^>]*>)?:\s*(.*)$/i;
 function parseInstruction(line) {
