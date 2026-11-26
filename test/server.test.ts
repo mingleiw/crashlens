@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { request } from "node:http";
+import { createServer, request, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { serve, type RunningServer } from "../src/server.js";
 
@@ -237,5 +238,135 @@ echo '{"code":"x","message":"stand-in REA"}'; exit 1
       const entries = await readdir(join(tmpdir(), name)).catch((): string[] => []);
       assert.ok(!entries.includes(core) && !entries.includes(binary), "upload folders were not deleted");
     }
+  });
+});
+
+describe("crashlens serve --ai: Ask AI", () => {
+  // The page hides "Ask AI" once its copy has a suggestion and goes busy while
+  // it waits, but busy only blocks the pointer: Enter on the focused button, or
+  // a second tab, sends another request for the same report.
+  let local: RunningServer;
+  let localPort: number;
+  const held: ServerResponse[] = [];
+  let calls = 0;
+  const api = createServer((req, res) => {
+    calls++;
+    req.resume();
+    req.on("end", () => held.push(res));
+  });
+  const env = { key: process.env["ANTHROPIC_API_KEY"], url: process.env["ANTHROPIC_BASE_URL"] };
+
+  before(async () => {
+    await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
+    process.env["ANTHROPIC_API_KEY"] = "test-key";
+    process.env["ANTHROPIC_BASE_URL"] = `http://127.0.0.1:${(api.address() as AddressInfo).port}`;
+    local = await serve({ port: 0, rea: { file: "rea", args: [] }, gdb: null, sourceRoot: null, ai: true });
+    localPort = Number(new URL(local.url).port);
+  });
+  beforeEach(async () => {
+    await send("POST", "/api/clear");
+    calls = 0;
+    held.length = 0;
+  });
+  after(async () => {
+    await local.close();
+    api.closeAllConnections();
+    api.close();
+    for (const [name, value] of [["ANTHROPIC_API_KEY", env.key], ["ANTHROPIC_BASE_URL", env.url]] as const)
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+
+  const send = (method: string, path: string, body = "") =>
+    new Promise<Reply>((resolve, reject) => {
+      const req = request(
+        { host: "127.0.0.1", port: localPort, method, path, headers: { Host: `127.0.0.1:${localPort}`, "X-Crashlens-Token": local.token } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+  const answer = (res: ServerResponse, text: string) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "msg_1", type: "message", role: "assistant", model: "claude-opus-5-5",
+      content: [{ type: "text", text }], stop_reason: "end_turn", stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 20 },
+    }));
+  };
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 250 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  const newReport = async () => {
+    const text = readFileSync(join(fixtures, "py-none.txt"), "utf8");
+    return (JSON.parse((await send("POST", "/api/text", JSON.stringify({ text }))).body) as { id: string }).id;
+  };
+  const ask = (id: string) => send("POST", "/api/ai", JSON.stringify({ id }));
+  const reports = async () =>
+    (JSON.parse((await send("GET", "/api/state")).body) as { issues: { issue: { sections: { kind: string }[] } }[] }).issues;
+  const suggestions = async () => (await reports())[0]?.issue.sections.filter((s) => s.kind === "markdown").length;
+
+  it("sends a report to the API once when asked twice at the same time", async () => {
+    const id = await newReport();
+    // First press: wait until its request is with the API.
+    const first = ask(id);
+    await until(() => calls === 1);
+    assert.equal(calls, 1);
+    // Second press while the first is still waiting: either it is turned away,
+    // or it reaches the API too.
+    let secondDone = false;
+    const second = ask(id).then((reply) => ((secondDone = true), reply));
+    await until(() => secondDone || calls === 2);
+    held.splice(0).forEach((res, i) => answer(res, `### What happened\nanswer ${i + 1}`));
+    const statuses = [(await first).status, (await second).status].sort();
+    assert.deepEqual({ calls, suggestions: await suggestions(), statuses }, { calls: 1, suggestions: 1, statuses: [200, 409] });
+  });
+
+  it("does not ask again for a report that already has a suggestion", async () => {
+    // A second tab loaded before the answer arrived still shows the button.
+    const id = await newReport();
+    const first = ask(id);
+    await until(() => calls === 1);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 1"));
+    assert.equal((await first).status, 200);
+    let laterDone = false;
+    const later = ask(id).then((reply) => ((laterDone = true), reply));
+    await until(() => laterDone || calls === 2);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 2"));
+    const reply = await later;
+    assert.deepEqual({ calls, suggestions: await suggestions(), status: reply.status }, { calls: 1, suggestions: 1, status: 409 });
+    assert.match(JSON.parse(reply.body).error, /already has an AI suggestion/);
+  });
+
+  it("lets you ask again after the API call failed", async () => {
+    const id = await newReport();
+    const failed = ask(id);
+    await until(() => calls === 1);
+    held.splice(0).forEach((res) =>
+      res.writeHead(400, { "Content-Type": "application/json" }).end(
+        JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "bad request" } }),
+      ),
+    );
+    assert.equal((await failed).status, 502);
+    const retry = ask(id);
+    await until(() => calls === 2);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer"));
+    assert.deepEqual({ status: (await retry).status, calls, suggestions: await suggestions() }, { status: 200, calls: 2, suggestions: 1 });
+  });
+
+  it("drops the answer when Clear all ran while Claude was answering", async () => {
+    const id = await newReport();
+    const pending = ask(id);
+    await until(() => calls === 1);
+    assert.equal((await send("POST", "/api/clear")).status, 200);
+    held.splice(0).forEach((res) => answer(res, "### What happened\nanswer 1"));
+    const reply = await pending;
+    assert.equal(reply.status, 409);
+    assert.match(JSON.parse(reply.body).error, /Clear all/);
+    assert.deepEqual(await reports(), []);
   });
 });
