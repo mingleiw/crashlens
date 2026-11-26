@@ -135,15 +135,7 @@ function parseFrame(line: string): GdbFrame[] {
   const placed = FRAME_PLACE.exec(rest);
   const call = placed?.[1] ?? rest;
   if (!call.endsWith(")")) return [];
-  let depth = 0;
-  let open = -1;
-  for (let i = call.length - 1; i >= 0; i--) {
-    if (call[i] === ")") depth++;
-    else if (call[i] === "(" && --depth === 0) {
-      open = i;
-      break;
-    }
-  }
+  const open = argumentListStart(call);
   const name = open <= 0 ? "" : call.slice(0, open).trim();
   if (name === "") return [];
   return [
@@ -154,6 +146,37 @@ function parseFrame(line: string): GdbFrame[] {
       source: placed?.[2] ?? null,
     },
   ];
+}
+
+/**
+ * Index of the `(` that opens the argument list closing `call`, or -1.
+ * Scans forward so that parentheses inside argument strings and chars
+ * (`s=0x… "call ("`, `c=40 '('`) are skipped; quotes count only inside
+ * parentheses, since only arguments hold them. If the quotes don't balance
+ * (gdb cut a long string short), falls back to matching from the end.
+ */
+function argumentListStart(call: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  let start = -1;
+  let last = -1;
+  for (let i = 0; i < call.length; i++) {
+    const c = call[i];
+    if (quote !== null) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+    } else if ((c === '"' || c === "'") && depth > 0) quote = c;
+    else if (c === "(") {
+      if (depth++ === 0) start = i;
+    } else if (c === ")" && depth > 0 && --depth === 0 && i === call.length - 1) last = start;
+  }
+  if (quote === null && depth === 0) return last;
+  depth = 0;
+  for (let i = call.length - 1; i >= 0; i--) {
+    if (call[i] === ")") depth++;
+    else if (call[i] === "(" && --depth === 0) return i;
+  }
+  return -1;
 }
 
 const INSTRUCTION = /^(=>)?\s*(0x[0-9a-f]+)(?: <[^>]*>)?:\s*(.*)$/i;

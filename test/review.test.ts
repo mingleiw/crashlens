@@ -364,6 +364,31 @@ describe("second review", () => {
     ]);
   });
 
+  it("finds the function name when an argument string or char holds an unmatched parenthesis", async () => {
+    const { parseGdbOutput } = await import("../src/gdb.js");
+    const report = parseGdbOutput(
+      [
+        "@@crashlens@@bt",
+        '#0  0x0000551 in parse_call (src=0x5555 "call (") at parse.c:12',
+        '#1  0x0000552 in close_paren (src=0x5556 "x)") at parse.c:20',
+        "#2  0x0000553 in on_char (c=40 '(') at lex.c:3",
+        '#3  0x0000554 in say (msg=0x5557 "he said \\"no (\\" twice") at say.c:9',
+        '#4  0x0000555 in (anonymous namespace)::log (fmt=0x5558 "%s (", n=1) at log.cc:4',
+        "#5  0x0000556 in main () at main.c:30",
+      ].join("\n"),
+      "",
+    );
+    assert.ok(report.status === "ok");
+    assert.deepEqual(report.frames.map((f) => [f.index, f.function, f.source]), [
+      [0, "parse_call", "parse.c:12"],
+      [1, "close_paren", "parse.c:20"],
+      [2, "on_char", "lex.c:3"],
+      [3, "say", "say.c:9"],
+      [4, "(anonymous namespace)::log", "log.cc:4"],
+      [5, "main", "main.c:30"],
+    ]);
+  });
+
   it("blames the line as it is in the working copy, not the same line number in HEAD", async () => {
     const root = project("blame-shift", { "app.py": ["def total(o):", '    return o["x"]', "", "", "def other():", "    return 1"] });
     const git = (author: string, ...a: string[]) => execFileSync("git", ["-c", `user.name=${author}`, "-c", "user.email=a@example.invalid", ...a], { cwd: root });
