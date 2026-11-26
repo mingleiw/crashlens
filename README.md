@@ -5,36 +5,72 @@
 
 **Logs tell you where your program was. crashlens tells you why it died.**
 
-The line that crashed is where a bad value was *used*. crashlens finds where it
-was *made*, so you (or your coding agent) fix the bug instead of hiding it.
+crashlens gives your coding agent a crash investigator. When a test panics, a
+service throws or a binary segfaults, the agent hands crashlens the output (or a
+core dump) and gets back a bug report: the failing line in *your* code, why it
+failed, and **where the bad value was made**, often in a different file. The
+agent then fixes that, instead of wrapping the crash line in an `if`.
 
-**[▶ Try the live demo](https://mingleiw.github.io/crashlens/)**: paste a stack trace and see the report, right in your browser.
+It reads files only. It never runs your program and needs no SDK.
 
-Use it [in your browser](#use-it-in-your-browser), [from the command line](#or-from-the-command-line),
-or [from your coding agent](#use-it-from-coding-agents) (Claude Code plugin + MCP server):
+## Quick start for coding agents
+
+**Claude Code:** install the plugin (a skill plus an MCP server):
 
 ```text
 /plugin install crashlens --marketplace mingleiw/crashlens
 ```
 
-When a program crashes, the logs usually just stop. crashlens reads what the
-crash left behind (a core dump, a panic, an exception, a sanitizer report) and
-writes a bug report you can paste into an issue: where it died, why, the log
-lines right before it, and, if you point it at your repo, where the bad value
-came from (often a different file), what probably went wrong there, and who
-last changed it. It never runs your program and needs no SDK.
+On Claude Code older than 2.1.275, use two steps:
+`/plugin marketplace add mingleiw/crashlens`, then `/plugin install crashlens@crashlens`.
 
-![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
+**Any other MCP client** (Cursor, Codex, Claude Desktop, Hermes, ...): add the
+server. It needs only Node.js 22.19+; the first run builds crashlens, so it takes a minute.
 
-```bash
-crashlens ./core ./parser > crash.md
+```json
+{ "mcpServers": { "crashlens": { "command": "npx", "args": ["-y", "github:mingleiw/crashlens", "mcp"] } } }
 ```
 
-<details open>
-<summary><b>A real report</b>, generated from a crashed C program (paste it straight into a GitHub issue)</summary>
-<br>
-<img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
-</details>
+From a checkout, use `"command": "node", "args": ["/path/to/crashlens/plugin/crashlens.mjs", "mcp"]`.
+
+Then work as usual. You don't need to mention crashlens: the skill tells the
+agent to reach for it whenever something fails with a stack trace, panic,
+exception, sanitizer report or core dump.
+
+## What your agent gets
+
+Four read-only MCP tools:
+
+| Tool | Use it for | Key arguments |
+| --- | --- | --- |
+| `analyze_failure` | a panic, exception, pytest failure, Sentry event or sanitizer report, as text or a log file | `text` or `path`, `source_dir` |
+| `analyze_core_dump` | a Linux native crash | `core_path`, `binary_path`, `log_path`, `source_dir` |
+| `decompile_function` | reading a caller in a stripped binary, to see where a bad pointer was set | `binary_path`, `function` |
+| `analyze_crash_folder` | a CI artifacts folder or crash directory: groups hundreds of files into distinct bugs, ranked by count, in about a second | `dir`, `binary_path`, `source_dir` |
+
+Passing `source_dir` (the repository root) is what makes the report useful to
+an agent: it adds the failing lines, who last changed them, and the trace of
+the bad value back to where it was produced, with named hypotheses (a missing
+`await`, a key that differs in case, a field the producer spells differently,
+a config merge that drops a nested key, ...).
+
+The skill ([plugin/skills/crashlens/SKILL.md](plugin/skills/crashlens/SKILL.md))
+then has the agent:
+
+1. capture the whole failure (`2>&1`, `RUST_BACKTRACE=1`, `pytest -l`),
+2. read the hypotheses and "where the bad value came from" first,
+3. say in one sentence where the bad value was produced, and fix that code, not
+   the line that blew up,
+4. rerun and check the bug's signature is gone.
+
+The skill uses only portable frontmatter, so it also works as a standalone
+Agent Skill. No MCP at all? Agents can call the CLI
+(`<command> 2>&1 | crashlens - --source "$PWD"`, add `--json` for fields), and
+[docs/prompts/crash-triage.md](docs/prompts/crash-triage.md) is a copy-paste
+prompt that walks any agent with REA connected from a core dump to a root cause.
+
+Text failures need nothing but Node.js. Core dumps also need REA and
+`REA_PWNTOOLS_PYTHON` (see [Install](#install)).
 
 ## Why: the crash line is the smoke alarm, not the fire
 
@@ -80,7 +116,11 @@ not a study. The harness is in the repo, so rerun it and send results.
 > stack traces, and ASan/LSan/UBSan reports. Got a crash that stumped you? Open
 > an issue. Real crashes are the best test cases.
 
-## Use it in your browser
+## For people: browser and command line
+
+The same reports work without an agent.
+
+### In your browser
 
 The [live demo](https://mingleiw.github.io/crashlens/) runs the same interface
 with sample bugs, plus a **Try a sample core dump** button that walks through a
@@ -102,7 +142,7 @@ The app runs on `127.0.0.1` only, needs the private token in the URL it
 prints, loads nothing from the internet, and deletes uploaded files when it
 stops.
 
-## Or from the command line
+### From the command line
 
 ```bash
 crashlens ./core ./app                     # a native crash: core dump + the binary
@@ -111,41 +151,13 @@ crashlens error.log --source ~/code/shop   # ...and show the failing code + git 
 crashlens --batch ./crashes ./app          # a folder of crashes, grouped into bugs
 ```
 
-## Use it from coding agents
+![Logs stop at "calculating total". crashlens says: NULL pointer dereference in sum+0x31, rax = 0x0](docs/images/before-after.svg)
 
-crashlens ships as a Claude Code plugin: a skill that teaches the agent when
-to use it and how to fix the root cause, plus an MCP server with four
-read-only tools (`analyze_failure`, `analyze_core_dump`, `decompile_function`,
-`analyze_crash_folder`).
-
-```text
-/plugin install crashlens --marketplace mingleiw/crashlens
-```
-
-On Claude Code older than 2.1.275, use two steps:
-`/plugin marketplace add mingleiw/crashlens`, then `/plugin install crashlens@crashlens`.
-
-Then just work as usual. When a test panics or a service throws, the agent
-passes the output to crashlens and gets the failing frame in your code, where
-the bad value came from, the likely cause and a stable signature. The skill
-has it state that hypothesis and fix the code that produced the value, not
-add a guard at the crash site, then rerun to check the signature is gone. The plugin bundles crashlens into one file, so it needs nothing but
-Node.js. Core dumps also need REA and `REA_PWNTOOLS_PYTHON` (see
-[Install](#install)).
-
-Other MCP clients (Cursor, Codex, Claude Desktop, ...) can run the same server
-from a checkout:
-
-```json
-{ "mcpServers": { "crashlens": { "command": "node", "args": ["/path/to/crashlens/plugin/crashlens.mjs", "mcp"] } } }
-```
-
-No plugin? [docs/prompts/crash-triage.md](docs/prompts/crash-triage.md) is a
-copy-paste prompt that walks any agent with REA connected from a core dump to a
-root cause, the same way crashlens does.
-
-The skill itself ([plugin/skills/crashlens/SKILL.md](plugin/skills/crashlens/SKILL.md))
-uses only portable frontmatter, so it also works as a standalone Agent Skill.
+<details>
+<summary><b>A real report</b>, generated from a crashed C program (paste it straight into a GitHub issue)</summary>
+<br>
+<img src="docs/images/report.png" alt="crashlens report: NULL pointer dereference in sum+0x31, with crash details, backtrace, faulting instruction, registers and next steps" width="640">
+</details>
 
 ## Does it help agents? (benchmark)
 
@@ -447,13 +459,7 @@ Panics, exceptions and sanitizer reports need only Node.js 22.19+:
 python3 app.py 2>&1 | npx -y github:mingleiw/crashlens -
 ```
 
-For coding agents (Claude Code, Hermes, Grok Bot or any MCP client), the MCP
-server command is:
-
-```bash
-npx -y github:mingleiw/crashlens mcp
-```
-
+For coding agents, see [Quick start for coding agents](#quick-start-for-coding-agents).
 The first run builds crashlens, so it takes a minute. Core dumps need the full
 install below.
 
